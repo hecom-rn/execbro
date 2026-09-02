@@ -40,6 +40,7 @@ import {
 } from "../core/index.js";
 import type { DeviceInfo, ConnectionGap } from "../core/index.js";
 import { DEVICE_ALL_DESC } from "./_deviceArg.js";
+import { displayAppId } from "../core/appDetection.js";
 
 export function registerConnectionTools(server: McpServer): void {
     // Tool: Scan for Metro servers
@@ -369,7 +370,12 @@ export function registerConnectionTools(server: McpServer): void {
             // visible instead of silently filtered out.
             const deviceLines = apps.map(({ app, isConnected }, i) => {
                 const name = app.deviceInfo.deviceName || app.deviceInfo.title;
-                const appId = app.deviceInfo.appId || app.deviceInfo.title.split(" (")[0] || "unknown";
+                const resolvedAppId = displayAppId(
+                    app.deviceInfo.appId || app.deviceInfo.title.split(" (")[0] || undefined,
+                    name
+                );
+                const appId = resolvedAppId.appId +
+                    (resolvedAppId.fallback ? " (app name not reported by the app — using device name)" : "");
                 const statusSuffix = isConnected
                     ? ""
                     : ` [${getWebSocketStateName(app.ws.readyState).toLowerCase()} — reconnecting]`;

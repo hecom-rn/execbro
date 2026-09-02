@@ -32,6 +32,21 @@ function formatVersion(v: { major: number; minor: number; patch: number }): stri
 }
 
 /**
+ * Readable app id for display (get_apps, tool banners). Metro's inspector
+ * proxy synthesizes "undefinedAppName@<ts>" when the app never reports its
+ * name — every harmony bundle did this as of RN 0.77.1/RNOH. Fall back to
+ * the device name and say so, rather than showing a generated blob.
+ */
+export function displayAppId(
+    appId: string | undefined,
+    deviceName?: string
+): { appId: string; fallback: boolean } {
+    if (appId && !appId.startsWith("undefinedAppName@")) return { appId, fallback: false };
+    if (deviceName) return { appId: deviceName, fallback: true };
+    return { appId: "unknown", fallback: true };
+}
+
+/**
  * Platform from the raw `PlatformConstants.os` string. RNOH (react-native-harmony)
  * reports "harmony" here; a value we do not recognise leaves the caller's
  * platform untouched — a compat layer that masks the OS must not be guessed at.
