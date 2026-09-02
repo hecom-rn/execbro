@@ -74,6 +74,24 @@ export async function fetchHarmonyLines(opts: {
     return lines.filter((l) => l.ts.getTime() >= opts.sinceTs!.getTime() - 1);
 }
 
+/**
+ * The real bundle name of the foreground RN app, read off the dumpLayout
+ * tree's bundleName attribute. Needed because Metro reports the app id as an
+ * "undefinedAppName@<ts>" blob on RNOH, which pidof can never resolve.
+ */
+export async function resolveHarmonyBundleName(targetKey?: string): Promise<string | undefined> {
+    const { harmonyDumpLayout } = await import("./harmony.js");
+    const dump = await harmonyDumpLayout(targetKey);
+    if (!dump.success || !dump.root) return undefined;
+    const stack = [dump.root];
+    while (stack.length) {
+        const n = stack.pop()!;
+        if (n.bundleName) return n.bundleName;
+        stack.push(...n.children);
+    }
+    return undefined;
+}
+
 /** Resolve the app's live pid by bundle name, or undefined when not running (verify V2). */
 export async function resolveHarmonyPid(
     bundleName: string,

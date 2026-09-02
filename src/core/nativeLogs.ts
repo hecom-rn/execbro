@@ -296,6 +296,14 @@ async function fetchForTarget(
         const identity = { ...target.identity };
         let lines: RawLogLine[];
         if (target.platform === "harmony") {
+            // Metro reports the app id as an undefinedAppName@ blob on RNOH;
+            // pidof can never resolve that. The real bundle name is on the
+            // dumpLayout tree — resolve it once and keep the identity honest.
+            if (!identity.pid || identity.appId.startsWith("undefinedAppName@")) {
+                const { resolveHarmonyBundleName } = await import("./logSourceHarmony.js");
+                const bundle = await resolveHarmonyBundleName(target.hdcKey);
+                if (bundle) identity.appId = bundle;
+            }
             identity.pid = await resolveHarmonyPid(identity.appId, target.hdcKey);
             lines = await fetchHarmonyLines({ targetKey: target.hdcKey, sinceTs });
         } else if (target.platform === "android") {

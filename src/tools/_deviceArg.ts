@@ -45,7 +45,7 @@ export async function resolveAndroidDeviceId(
         return {
             ok: false,
             response: errResponse(
-                `Error: "${hint}" resolved to an iOS device (${resolved.target.deviceName}) — this tool only targets Android. Use the iOS-equivalent tool.`
+                `Error: "${hint}" resolved to a ${resolved.target.platform} device (${resolved.target.deviceName}) — this tool only targets Android. Use the equivalent tool for that platform.`
             )
         };
     }
@@ -81,7 +81,7 @@ export async function resolveIosUdid(
         return {
             ok: false,
             response: errResponse(
-                `Error: "${hint}" resolved to an Android device (${resolved.target.deviceName}) — this tool only targets iOS. Use the Android-equivalent tool.`
+                `Error: "${hint}" resolved to a ${resolved.target.platform} device (${resolved.target.deviceName}) — this tool only targets iOS. Use the equivalent tool for that platform.`
             )
         };
     }
