@@ -76,8 +76,31 @@ blob，pidof 解析不出 pid，归属管线全部丢弃。回修：`resolveHarm
 | get_bundle_errors 兜底 | ✅ harmony 分派已接（与 ocr_screenshot 同构）。注意：兜底门控 `metroRunning && !hasConnectedApps` 在 Metro 仍广播僵尸 target 时不可达（三平台共有的既有行为），本轮未触发到该分支 |
 | parseScreenSize 空格 | ✅ 正则放宽 `activeMode: WxH` |
 
+## 第三轮（2026-09-02）：pinch 调研定论 + dismiss_keyboard 复测
+
+**pinch — 定论：鸿蒙不支持，如实报错（commit 6ae91d9）**
+- `uitest uiInput` 子命令集无多指（click/doubleClick/longClick/swipe/drag/fling/dircFling/
+  inputText/text/keyEvent）。
+- `/system/bin/uinput` 二进制含 pinch 事件路径（`-p <dx> <dy> <scalePercent>`、
+  ActionPinchEvent、ABS_MT_SLOT、"up to three finger"），但**真机实测全部静默无效**：
+  `-p` 各参数变体（120/140/200/250、带时长）exit 0 且像素级零变化（图库发票大图、
+  详情页表格、桌面三处判定面）；两指分进程 down/move/up 交错也无法合成单手势
+  （每个 uinput 进程是独立虚拟设备）。hilog MMI 域无事件痕迹。
+- 结论：模拟器上 uinput pinch 不生效；可行路径是 UiDriver(ArkXTest) 测试基座（另行立项）。
+  工具层 harmony 报错文案已写明该调研结论。
+- 顺带修复：accessibility 匹配升级为分级评分——RNOH 会在 dumpLayout key 上加后缀
+  （fiber testID `tabbarMenuPage_Item_X` 实际为 `..._X_业务对象`），且只允许 dump key
+  包含 testID 的单向包含（反向会让 `tabbarMenu` 误配任何更长查询）。真机复测报表项
+  点击成功。
+
+**dismiss_keyboard — 复测通过（行为正确，无代码改动）**
+- 搜索框聚焦（inputMethodPanel 在场）→ dismiss_keyboard → 响应如实说明
+  "Keyboard visibility could NOT be verified (Keyboard module unreachable)"，无假成功；
+- dumpLayout 地面真值：键盘实际已被关闭（inputMethodPanel 消失）——React blur 在
+  鸿蒙上真实生效，保守文案与正确行为并存。
+
 ## 剩余待办（P3）
 
 1. debug 构建 source 符号化复测（需应用侧配合出 debug 包）。
-2. dismiss_keyboard 验证语义在鸿蒙上的实际表现复测。
-3. Phase 4 调研项维持不变：pinch（uitest 多指）、hdc install、deep link（aa start 带 URI）、模拟器管理。
+2. Phase 4 调研项：hdc install、deep link（aa start 带 URI）、模拟器管理；
+   pinch 若要支持需 UiDriver(ArkXTest) 基座（见第三轮定论）。
