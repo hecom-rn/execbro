@@ -195,6 +195,7 @@ export async function verifyAndCapture(args: {
     beforeBuffer: Buffer | null;
     udid?: string;
     deviceId?: string;
+    hdcKey?: string;
     beforeScaleFactor?: number;
     markerPx?: { x: number; y: number };
     source?: string;
@@ -210,6 +211,7 @@ export async function verifyAndCapture(args: {
         beforeBuffer,
         udid,
         deviceId,
+        hdcKey,
         beforeScaleFactor,
         markerPx,
     } = args;
@@ -238,14 +240,14 @@ export async function verifyAndCapture(args: {
         settle = await settleAndDiff({
             beforeBuffer: beforeBuffer!,
             statusBarHeight: settleStatusBarHeight,
-            capture: () => captureScreenshot(platform, udid, deviceId),
+            capture: () => captureScreenshot(platform, udid, deviceId, hdcKey),
             noChangeConfirmMs: platform === "android" ? NO_CHANGE_CONFIRM_ANDROID_MS : NO_CHANGE_CONFIRM_MS
         });
     } else {
         await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_START_MS));
     }
 
-    let after = settle ? settle.frame : await captureScreenshot(platform, udid, deviceId);
+    let after = settle ? settle.frame : await captureScreenshot(platform, udid, deviceId, hdcKey);
     if (!after) {
         if (shouldVerify) {
             return {
@@ -343,6 +345,7 @@ export async function burstCaptureAndVerify(args: {
     beforeBuffer: Buffer | null;
     udid?: string;
     deviceId?: string;
+    hdcKey?: string;
     beforeScaleFactor?: number;
     markerPx?: { x: number; y: number };
     source?: string;
@@ -351,7 +354,7 @@ export async function burstCaptureAndVerify(args: {
     verification?: TapVerification;
     afterWithMarkerBuffer?: Buffer;
 }> {
-    const { platform, beforeBuffer, udid, deviceId, beforeScaleFactor, markerPx } = args;
+    const { platform, beforeBuffer, udid, deviceId, hdcKey, beforeScaleFactor, markerPx } = args;
     const source = args.source ?? "tap-burst";
     const groupIntent = source === "tap-burst" ? "tap-verification" : `${source.replace(/-burst$/, "")}-verification`;
     const action: "tap" | "swipe" = source.startsWith("swipe") ? "swipe" : "tap";
@@ -363,7 +366,7 @@ export async function burstCaptureAndVerify(args: {
 
     for (let i = 0; i < BURST_FRAME_COUNT; i++) {
         await new Promise((resolve) => setTimeout(resolve, BURST_FRAME_INTERVAL_MS));
-        const capture = await captureScreenshot(platform, udid, deviceId);
+        const capture = await captureScreenshot(platform, udid, deviceId, hdcKey);
         if (capture) {
             frames.push(capture.buffer);
             if (i === 0) capturedScaleFactor = capture.scaleFactor || capturedScaleFactor;

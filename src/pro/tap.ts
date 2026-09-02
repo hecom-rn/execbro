@@ -1084,6 +1084,12 @@ async function tryAccessibilityStrategy(
     deviceId?: string,
     duration?: number
 ): Promise<StrategyResult> {
+    if (platform === "harmony") {
+        // The harmony accessibility dump (uitest dumpLayout) is not wired yet —
+        // fiber and OCR remain available; report the skip instead of running
+        // the adb tree by accident.
+        return { success: false, reason: "accessibility strategy not supported on harmony yet" };
+    }
     if (sink) sink.accessibility.ran = true;
     const startedAt = Date.now();
     try {
@@ -1342,7 +1348,7 @@ async function tryAccessibilityStrategy(
  * `sink.ocr.bestCandidate` (matched text + tap coords) into the evidence sink,
  * which is serialized into the R2 failure bundle for diagnostics.
  */
-async function tryOcrStrategy(query: TapQuery, platform: DevicePlatform, udid?: string, sink?: EvidenceSink, signal?: AbortSignal, deviceId?: string, duration?: number): Promise<StrategyResult> {
+async function tryOcrStrategy(query: TapQuery, platform: DevicePlatform, udid?: string, sink?: EvidenceSink, signal?: AbortSignal, deviceId?: string, hdcKey?: string, duration?: number): Promise<StrategyResult> {
     if (sink) sink.ocr.ran = true;
     const ocrStartedAt = Date.now();
     try {
@@ -1360,6 +1366,17 @@ async function tryOcrStrategy(query: TapQuery, platform: DevicePlatform, udid?: 
                 return {
                     success: false,
                     reason: "Failed to capture iOS screenshot for OCR"
+                };
+            }
+            imageBuffer = screenshot.data;
+            scaleFactor = screenshot.scaleFactor ?? 1;
+        } else if (platform === "harmony") {
+            const { harmonyScreenshot } = await import("../core/harmony.js");
+            const screenshot = await harmonyScreenshot(undefined, hdcKey);
+            if (!screenshot.success || !screenshot.data) {
+                return {
+                    success: false,
+                    reason: "Failed to capture HarmonyOS screenshot for OCR"
                 };
             }
             imageBuffer = screenshot.data;
@@ -1435,6 +1452,20 @@ async function tryOcrStrategy(query: TapQuery, platform: DevicePlatform, udid?: 
                     reason: `OCR found "${match.text}" but tap failed: ${tapResult.error}`
                 };
             }
+        } else if (platform === "harmony") {
+            // HarmonyOS: image-pixel -> device-pixel, hdc uiInput accepts pixels
+            const { harmonyTap } = await import("../core/harmony.js");
+            const ocrTap = await harmonyTap(
+                Math.round(match.tapCenter.x * scaleFactor),
+                Math.round(match.tapCenter.y * scaleFactor),
+                hdcKey
+            );
+            if (!ocrTap.success) {
+                return {
+                    success: false,
+                    reason: `OCR found "${match.text}" but tap failed: ${ocrTap.error}`
+                };
+            }
         } else {
             // Android: image-pixel → device-pixel (undo downscale), ADB accepts pixels
             const ocrTap = await androidTap(
@@ -1482,7 +1513,8 @@ async function tryCoordinateStrategy(
     },
     udid?: string,
     deviceId?: string,
-    duration?: number
+    duration?: number,
+    hdcKey?: string
 ): Promise<StrategyResult> {
     try {
         if (platform === "ios") {
@@ -1508,6 +1540,22 @@ async function tryCoordinateStrategy(
                 success: true,
                 reason: "Tapped at coordinates (iOS)",
                 convertedTo: { x: converted.x, y: converted.y, unit: "points" }
+            };
+        } else if (platform === "harmony") {
+            const scaleFactor = lastScreenshot?.scaleFactor ?? 1;
+            const converted = convertScreenshotToTapCoords(pixelX, pixelY, "harmony", 1, scaleFactor);
+            const { harmonyTap } = await import("../core/harmony.js");
+            const coordTap = await harmonyTap(converted.x, converted.y, hdcKey);
+            if (!coordTap.success) {
+                return {
+                    success: false,
+                    reason: `Coordinate tap failed: ${coordTap.error}`
+                };
+            }
+            return {
+                success: true,
+                reason: "Tapped at coordinates (HarmonyOS)",
+                convertedTo: { x: converted.x, y: converted.y, unit: "pixels" }
             };
         } else {
             const scaleFactor = lastScreenshot?.scaleFactor ?? 1;
@@ -2163,6 +2211,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
     // it adb falls back to its own default device, which on a multi-emulator
     // setup is not the one the caller asked for.
     const targetSerial: string | undefined = resolved.target.androidSerial;
+    const targetHdcKey: string | undefined = resolved.target.harmonyTargetKey;
 
     // Pick the connected app to bias strategy selection. Prefer the registry
     // entry whose identifier matches the resolved target; fall back to a
@@ -2479,7 +2528,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                         }
                     }
                     result = await withCancelableTimeout(
-                        (signal) => tryOcrStrategy(query, platform, targetUdid, evidence, signal, targetSerial, options.duration),
+                        (signal) => tryOcrStrategy(query, platform, targetUdid, evidence, signal, targetSerial, targetHdcKey, options.duration),
                         budget,
                         `ocr`
                     );
@@ -2503,7 +2552,8 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                                 : app?.lastScreenshot,
                             targetUdid,
                             targetSerial,
-                            options.duration
+                            options.duration,
+                            targetHdcKey
                         ),
                         budget,
                         `coordinate`
@@ -2806,7 +2856,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         // Do NOT fall through to other strategies (they can't resolve ambiguity).
         if (result.matches && result.ambiguous) {
             const { screenshot: matchScreenshot } = shouldScreenshot
-                ? await verifyAndCapture({ platform, shouldVerify: false, shouldScreenshot: true, beforeBuffer: null, udid: targetUdid, deviceId: targetSerial })
+                ? await verifyAndCapture({ platform, shouldVerify: false, shouldScreenshot: true, beforeBuffer: null, udid: targetUdid, deviceId: targetSerial, hdcKey: targetHdcKey })
                 : { screenshot: undefined };
             if (matchScreenshot && app) {
                 app.lastScreenshot = {
@@ -2849,7 +2899,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         suggestion = `All strategies timed out — the element's presence is UNKNOWN. Retry the tap (transient slowness is common on dense screens), or try a different strategy explicitly (e.g. strategy='fiber' if accessibility timed out). ` + suggestion;
     }
     const { screenshot: failScreenshot } = shouldScreenshot
-        ? await verifyAndCapture({ platform, shouldVerify: false, shouldScreenshot: true, beforeBuffer: null, udid: targetUdid, deviceId: targetSerial })
+        ? await verifyAndCapture({ platform, shouldVerify: false, shouldScreenshot: true, beforeBuffer: null, udid: targetUdid, deviceId: targetSerial, hdcKey: targetHdcKey })
         : { screenshot: undefined };
     if (failScreenshot && app) {
         app.lastScreenshot = {
