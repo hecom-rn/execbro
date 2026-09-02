@@ -20,7 +20,7 @@ if(p&&p.PlatformConstants){c=typeof p.PlatformConstants.getConstants==='function
 if(!c&&typeof globalThis.__turboModuleProxy==='function'){try{var tm=globalThis.__turboModuleProxy('PlatformConstants');if(tm)c=typeof tm.getConstants==='function'?tm.getConstants():tm}catch(e){}}
 if(!c){var bc=globalThis.__fbBatchedBridgeConfig;if(bc&&bc.remoteModuleConfig){for(var i=0;i<bc.remoteModuleConfig.length;i++){var mc=bc.remoteModuleConfig[i];if(mc&&mc[0]==='PlatformConstants'&&mc[1]){c=mc[1];break}}}}
 if(!c&&typeof globalThis.nativeRequireModuleConfig==='function'){try{var nc=globalThis.nativeRequireModuleConfig('PlatformConstants');if(typeof nc==='string')nc=JSON.parse(nc);if(nc&&nc[1])c=nc[1]}catch(e){}}
-if(c){if(c.reactNativeVersion)r.rnVersion=c.reactNativeVersion;if(c.osVersion)r.osVersion=c.osVersion;if(c.systemName)r.systemName=c.systemName}
+if(c){if(c.reactNativeVersion)r.rnVersion=c.reactNativeVersion;if(c.osVersion)r.osVersion=c.osVersion;if(c.systemName)r.systemName=c.systemName;if(c.os)r.os=c.os}
 r.newArch=typeof globalThis.nativeFabricUIManager==='object';
 r.hermes=typeof globalThis.HermesInternal!=='undefined';
 var ep=p&&p.ExpoConstants;if(!ep&&typeof globalThis.__turboModuleProxy==='function'){try{ep=globalThis.__turboModuleProxy('ExpoConstants')}catch(e){}}
@@ -31,11 +31,27 @@ function formatVersion(v: { major: number; minor: number; patch: number }): stri
     return `${v.major}.${v.minor}.${v.patch}`;
 }
 
-function parseDetectionResult(
+/**
+ * Platform from the raw `PlatformConstants.os` string. RNOH (react-native-harmony)
+ * reports "harmony" here; a value we do not recognise leaves the caller's
+ * platform untouched — a compat layer that masks the OS must not be guessed at.
+ */
+export function platformFromRawOs(os: string | undefined): DevicePlatform | null {
+    if (!os) return null;
+    const v = os.toLowerCase();
+    if (v.includes("harmony") || v.includes("ohos")) return "harmony";
+    if (v === "ios") return "ios";
+    if (v === "android") return "android";
+    return null;
+}
+
+export function parseDetectionResult(
     raw: {
         rnVersion?: { major: number; minor: number; patch: number };
         osVersion?: string;
         systemName?: string;
+        /** Raw PlatformConstants.os — RNOH reports "harmony" here (verify on device, V1). */
+        os?: string;
         newArch?: boolean;
         hermes?: boolean;
         expoSdk?: string;
@@ -51,7 +67,7 @@ function parseDetectionResult(
         reactNativeVersion: raw.rnVersion ? formatVersion(raw.rnVersion) : "unknown",
         architecture: raw.newArch ? "new" : "old",
         jsEngine: raw.hermes ? "hermes" : "jsc",
-        appPlatform: platform,
+        appPlatform: platformFromRawOs(raw.os) ?? platform,
         osVersion: raw.osVersion || "unknown",
         ...(raw.expoSdk ? { expoSdkVersion: raw.expoSdk } : {}),
     };
@@ -107,6 +123,21 @@ export function scheduleAppDetection(app: ConnectedApp): void {
                     if (parsed) {
                         parsed.detectionSource = "probe";
                         app.appDetection = parsed;
+                        // The probe read the app's own PlatformConstants — trust it
+                        // over the connect-time default (which is "android" for
+                        // every app until a sim/adb link upgrades it).
+                        app.platform = parsed.appPlatform;
+                        if (parsed.appPlatform === "harmony" && !app.harmonyTargetKey) {
+                            // Link the hdc target only when exactly one is attached —
+                            // with several, correlation is a guess, and a wrong key
+                            // points native tools at the wrong device.
+                            void import("./harmony.js")
+                                .then(async (h) => {
+                                    const targets = await h.listHarmonyTargets();
+                                    if (targets.length === 1) app.harmonyTargetKey = targets[0].key;
+                                })
+                                .catch(() => {});
+                        }
                         trackAppDetection(parsed);
                         const versionStr = parsed.reactNativeVersion !== "unknown"
                             ? `RN ${parsed.reactNativeVersion}, ` : "";
