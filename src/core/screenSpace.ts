@@ -20,8 +20,10 @@
  * passed to any other tool.
  */
 
+import type { DevicePlatform } from "./types.js";
+
 export interface ScreenSpaceMetrics {
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     /** iOS: safe-area top in points. Android: status bar height in dp. 0 disables shifting. */
     topInset: number;
     /**
@@ -81,14 +83,14 @@ export function computePixelScale(
  */
 export function toScreenSpaceY(y: number, m: ScreenSpaceMetrics): number {
     if (!m.topInset || m.topInset <= 0) return y;
-    if (m.platform === "android") return y + m.topInset;
+    if (m.platform !== "ios") return y + m.topInset;
     return y < m.topInset ? y + m.topInset : y;
 }
 
 /** Screen-space y -> fiber-space y. Inverse of {@link toScreenSpaceY}. */
 export function fromScreenSpaceY(y: number, m: ScreenSpaceMetrics): number {
     if (!m.topInset || m.topInset <= 0) return y;
-    if (m.platform === "android") return y - m.topInset;
+    if (m.platform !== "ios") return y - m.topInset;
     // Mirror of the forward rule: only values that could have been shifted are unshifted.
     // A y in [topInset, 2*topInset) is the image of [0, topInset) under the forward map.
     return y >= m.topInset && y < m.topInset * 2 ? y - m.topInset : y;
@@ -122,7 +124,7 @@ function scaleOf(m: ScreenSpaceMetrics): number {
  */
 export function unresolvedScaleNote(m: ScreenSpaceMetrics): string {
     if (m.pixelScale && m.pixelScale > 0) return "";
-    const unit = m.platform === "android" ? "dp" : "points";
+    const unit = m.platform === "ios" ? "points" : m.platform === "harmony" ? "px" : "dp";
     return (
         `⚠️ Coordinates below are in ${unit}, NOT the usual delivered-pixel space — the ` +
         `device scale could not be read. Do not pass them to tap(); take coordinates from ` +

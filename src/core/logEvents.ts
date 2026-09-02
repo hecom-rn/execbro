@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { CDPStackFrame, LogLevel } from "./types.js";
+import type { CDPStackFrame, LogLevel, DevicePlatform } from "./types.js";
 
 /**
  * Real severity levels, ordered. Excludes the "all" sentinel that LogLevel
@@ -71,7 +71,7 @@ export type DraftEvent = Omit<LogEvent, "id">;
 export interface AppIdentity {
     /** simulatorUdid ?? adbSerial — the buffer key. Never deviceName. */
     deviceKey: string;
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     /** THIS device's identifier. iOS bundle id and Android package differ. */
     appId: string;
     /** Live pid, when the app is running. Absent after a crash. */

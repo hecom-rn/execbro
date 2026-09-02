@@ -1,4 +1,5 @@
 import { execFileAsync } from "./exec.js";
+import type { DevicePlatform } from "./types.js";
 
 /**
  * Reading a field's text through the platform accessibility tree.
@@ -82,12 +83,17 @@ function parseAndroidFields(xml: string): NativeField[] {
 }
 
 export type NativeFieldsReader = (
-    platform: "ios" | "android",
+    platform: DevicePlatform,
     deviceId?: string
 ) => Promise<NativeFieldsResult>;
 
 export const readNativeFields: NativeFieldsReader = async (platform, deviceId) => {
     try {
+        if (platform === "harmony") {
+            // The harmony accessibility dump (uitest dumpLayout) is not wired
+            // yet; report unknown rather than shelling out to adb.
+            return { fields: [], error: "native field read is not supported on harmony yet" };
+        }
         if (platform === "ios") {
             if (!deviceId) return { fields: [], error: "no simulator UDID" };
             const { stdout } = await execFileAsync("axe", ["describe-ui", "--udid", deviceId], { timeout: 20_000 });

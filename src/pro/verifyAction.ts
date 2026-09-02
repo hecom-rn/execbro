@@ -8,6 +8,7 @@ import {
     analyzeBurstFrames,
     buildVerificationExplanation,
 } from "./tap.js";
+import type { DevicePlatform } from "../core/types.js";
 
 export const BURST_FRAME_COUNT = 4;
 export const BURST_FRAME_INTERVAL_MS = 150;
@@ -119,9 +120,10 @@ export async function settleAndDiff(args: {
 }
 
 export async function captureScreenshot(
-    platform: "ios" | "android",
+    platform: DevicePlatform,
     udid?: string,
-    deviceId?: string
+    deviceId?: string,
+    hdcKey?: string
 ): Promise<{
     buffer: Buffer;
     width: number;
@@ -133,8 +135,14 @@ export async function captureScreenshot(
         // neither means "whichever device adb/simctl picks", which on a
         // multi-device setup is a coin flip — and a before/after diff taken
         // from the wrong screen reports a confident false "no visual change".
-        const result = platform === "ios" ? await iosScreenshot(undefined, udid) : await androidScreenshot(undefined, deviceId);
-        if (!result.success || !result.data) return null;
+        // harmony capture joins when the hdc screenshot backend is wired; a
+        // null here reads as "cannot verify" downstream, never as success.
+        const result = platform === "ios"
+            ? await iosScreenshot(undefined, udid)
+            : platform === "android"
+            ? await androidScreenshot(undefined, deviceId)
+            : null;
+        if (!result || !result.success || !result.data) return null;
         return {
             buffer: result.data,
             width: result.originalWidth || 0,
@@ -180,7 +188,7 @@ export async function drawTapMarker(input: Buffer, x: number, y: number): Promis
 }
 
 export async function verifyAndCapture(args: {
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     shouldVerify: boolean;
     shouldScreenshot: boolean;
     beforeBuffer: Buffer | null;
@@ -221,7 +229,7 @@ export async function verifyAndCapture(args: {
     // verification disabled) there's nothing to wait for beyond the animation
     // lead-in, so take a single frame after a short pause.
     const canSettleLoop = shouldVerify && !!beforeBuffer;
-    const rawStatusBar = platform === "ios" ? 177 : 142;
+    const rawStatusBar = platform === "ios" ? 177 : 142; // harmony: unknown inset, android-like default
     const settleStatusBarHeight = Math.round(rawStatusBar / (beforeScaleFactor || 1));
 
     let settle: SettleResult | null = null;
@@ -330,7 +338,7 @@ export async function verifyAndCapture(args: {
 }
 
 export async function burstCaptureAndVerify(args: {
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     beforeBuffer: Buffer | null;
     udid?: string;
     deviceId?: string;
@@ -363,7 +371,7 @@ export async function burstCaptureAndVerify(args: {
 
     if (frames.length < 2) return {};
 
-    const rawStatusBar = platform === "ios" ? 177 : 142;
+    const rawStatusBar = platform === "ios" ? 177 : 142; // harmony: unknown inset, android-like default
     const statusBarHeight = Math.round(rawStatusBar / capturedScaleFactor);
     const analysis = await analyzeBurstFrames(frames, { statusBarHeight });
 

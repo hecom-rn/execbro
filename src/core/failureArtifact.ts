@@ -1,6 +1,7 @@
 import { gzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { getTelemetryApiKey, getTelemetryEndpoint } from "./telemetry.js";
+import type { DevicePlatform } from "../core/types.js";
 
 const TRUTHY_DISABLE = new Set(["1", "true", "yes", "on"]);
 const FALSY_TELEMETRY = new Set(["0", "false", "no", "off"]);
@@ -61,7 +62,7 @@ export interface ArtifactInput {
     chosenTapPoint: { x: number; y: number } | null;
     chosenElement: Record<string, unknown> | null;
     deviceMeta: {
-        platform: "ios" | "android";
+        platform: DevicePlatform;
         driver?: string;
         screenSize: { w: number; h: number };
         route?: string;

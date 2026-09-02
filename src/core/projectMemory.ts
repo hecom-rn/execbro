@@ -9,6 +9,7 @@ import {
     writeConcernAtomic,
     realpathOrRaw,
 } from "./projectStore.js";
+import type { DevicePlatform } from "./types.js";
 
 export interface ScreenMetrics {
     rawWidth: number;
@@ -25,7 +26,7 @@ export interface ScreenMetrics {
 export interface DeviceMemoryEntry {
     identifier: string;
     name: string;
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     appId?: string;
     firstSeenAt: number;
     lastUsedAt: number;
@@ -36,7 +37,7 @@ export interface DeviceMemoryEntry {
 export interface RecordDeviceInput {
     identifier: string;
     name: string;
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     appId?: string;
 }
 

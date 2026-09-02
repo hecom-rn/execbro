@@ -1,5 +1,6 @@
 import { execFileAsync } from "./exec.js";
 import { readKeyboardState, type KeyboardState } from "./keyboardMetrics.js";
+import type { DevicePlatform } from "./types.js";
 
 export type RaiseResult = {
     /** True when the keyboard is up — whether we raised it or it already was. */
@@ -59,10 +60,15 @@ function defaultDeps(device?: string): RaiseDeps {
  * neither of which belongs on the critical path of writing text.
  */
 export async function raiseKeyboard(
-    platform: "ios" | "android",
+    platform: DevicePlatform,
     deviceId?: string,
     deps: RaiseDeps = defaultDeps(deviceId)
 ): Promise<RaiseResult> {
+    if (platform === "harmony") {
+        // No raise mechanism is wired for harmony yet (T12 owns the honest
+        // degradation); refuse instead of running the adb path by accident.
+        return { raised: false, changed: false, reason: "keyboard raise is not supported on harmony yet" };
+    }
     try {
         const before = await deps.readState();
         if (before.error) return { raised: false, changed: false, reason: before.error };

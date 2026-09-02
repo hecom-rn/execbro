@@ -43,11 +43,14 @@ export interface DeviceInfo {
 }
 
 // Connected app info
+/** Platforms the device layer can address. "harmony" = OpenHarmony/HarmonyOS via hdc. */
+export type DevicePlatform = "ios" | "android" | "harmony";
+
 export interface ConnectedApp {
     ws: WebSocket;
     deviceInfo: DeviceInfo;
     port: number;
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     simulatorUdid?: string;
     // Android emulator/device serial (e.g. "emulator-5554"). Populated at
     // connect time when getAdbIdForAvd matches deviceName to a running
@@ -55,6 +58,10 @@ export interface ConnectedApp {
     // a dedicated matcher later. Used by deviceResolver to short-circuit
     // OS-level lookups.
     adbSerial?: string;
+    // hdc target key (e.g. "127.0.0.1:5555") when the app runs on a HarmonyOS
+    // device reachable over hdc. Populated at connect time by platform
+    // detection + hdc inventory correlation.
+    harmonyTargetKey?: string;
     lastScreenshot?: {
         originalWidth: number;
         originalHeight: number;
@@ -84,7 +91,7 @@ export interface AppDetectionResult {
     reactNativeVersion: string;
     architecture: "new" | "old";
     jsEngine: "hermes" | "jsc";
-    appPlatform: "ios" | "android";
+    appPlatform: DevicePlatform;
     osVersion: string;
     expoSdkVersion?: string;
     // "probe" = full Runtime.evaluate succeeded; "device-info" = inferred from
@@ -274,7 +281,7 @@ export interface ConnectionCheckResult {
 export interface EnsureConnectionDeviceInfo {
     deviceName: string;
     deviceTitle: string;
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     port: number;
     uptime: string;
     contextId: number | null;

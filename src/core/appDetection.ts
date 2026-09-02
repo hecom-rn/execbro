@@ -1,7 +1,7 @@
 import WebSocket from "ws";
 import { getNextMessageId } from "./state.js";
 import { trackAppDetection } from "./telemetry.js";
-import type { AppDetectionResult, ConnectedApp } from "./types.js";
+import type { AppDetectionResult, ConnectedApp, DevicePlatform } from "./types.js";
 
 const DETECTION_TIMEOUT_MS = 3000;
 const DETECTION_DELAY_MS = 500;
@@ -40,7 +40,7 @@ function parseDetectionResult(
         hermes?: boolean;
         expoSdk?: string;
     } | null,
-    platform: "ios" | "android"
+    platform: DevicePlatform
 ): AppDetectionResult | null {
     if (!raw) return null;
     // Accept partial results — arch/engine are always detectable even when

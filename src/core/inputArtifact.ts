@@ -18,11 +18,16 @@ import { captureFailureArtifact, type ArtifactOutcome, type CaptureSignals } fro
 import type { InputCandidate } from "./inputTarget.js";
 import { getServerVersion } from "./telemetry.js";
 import { captureScreenshot } from "../pro/verifyAction.js";
+import type { DevicePlatform } from "../core/types.js";
 
 export interface InputArtifactContext {
     outcome: ArtifactOutcome;
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     udid?: string;
+    /** Android adb serial. Without it the capture falls to adb's own default device. */
+    deviceId?: string;
+    /** hdc target key for harmony captures. */
+    hdcKey?: string;
     /** What the caller asked for, verbatim — the half of the story telemetry keeps. */
     predicate: Record<string, unknown>;
     errorMessage?: string;
@@ -50,7 +55,7 @@ export async function captureInputArtifact(ctx: InputArtifactContext): Promise<C
             return undefined;
         }
 
-        const shot = await captureScreenshot(ctx.platform, ctx.udid);
+        const shot = await captureScreenshot(ctx.platform, ctx.udid, ctx.deviceId, ctx.hdcKey);
 
         const result = await captureFailureArtifact({
             outcome: ctx.outcome,

@@ -6,6 +6,7 @@ import { randomUUID } from "crypto";
 import { createRequire } from "module";
 import { spawn } from "child_process";
 import { getInstallationId } from "./telemetry.js";
+import type { DevicePlatform } from "./types.js";
 
 // ============================================================================
 // Cloud OCR Configuration
@@ -39,7 +40,7 @@ export interface OCROptions {
     /** Scale factor from image resizing (default: 1) */
     scaleFactor?: number;
     /** Platform for coordinate conversion: ios uses points, android uses raw pixels */
-    platform?: "ios" | "android";
+    platform?: DevicePlatform;
     /** Device pixel ratio for iOS coordinate conversion (default: 3 for @3x devices, use 2 for older/iPad) */
     devicePixelRatio?: number;
     /**

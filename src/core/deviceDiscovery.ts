@@ -23,6 +23,15 @@ export interface AndroidPhysicalRow {
     rnConnected?: { deviceName: string; port: number };
 }
 
+export interface HarmonyTargetRow {
+    /** hdc target key, e.g. "127.0.0.1:5555" (emulator) or a connector serial (real device). */
+    key: string;
+    name: string;
+    state: "connected" | "disconnected";
+    kind: "emulator" | "real";
+    rnConnected?: { deviceName: string; port: number };
+}
+
 export interface ListAllDevicesResult {
     ios: {
         available: boolean;
@@ -34,6 +43,11 @@ export interface ListAllDevicesResult {
         error?: string;
         emulators: AndroidEmulatorRow[];
         physical: AndroidPhysicalRow[];
+    };
+    harmony: {
+        available: boolean;
+        error?: string;
+        targets: HarmonyTargetRow[];
     };
     summary: { booted: number; total: number };
 }
@@ -130,7 +144,9 @@ export async function listAllDevices(
     }
 
     const [ios, android] = await Promise.all([discoverIos(), discoverAndroid()]);
-    const partial = { ios, android };
+    // hdc inventory is wired by the harmony discovery task; absent until then.
+    const harmony: ListAllDevicesResult["harmony"] = { available: false, targets: [] };
+    const partial = { ios, android, harmony };
     const result: ListAllDevicesResult = {
         ...partial,
         summary: computeSummary(partial)

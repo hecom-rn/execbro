@@ -5,6 +5,7 @@
  * with no simctl/adb dependency.
  */
 
+import type { DevicePlatform } from "./types.js";
 import type { ScreenSpaceMetrics } from "./screenSpace.js";
 import { computeDeliveredDownscale } from "./screenSpace.js";
 import { getIOSSafeAreaTop, getDevicePixelRatio, getIOSScreenPixelSize } from "./ios.js";
@@ -51,7 +52,7 @@ function pixelScaleFrom(
  * undefined when the size is unknown, so callers can keep their own fallbacks.
  */
 export async function resolveDeliveredScaleFactor(opts: {
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     udid?: string;
     deviceId?: string;
 }): Promise<number | undefined> {
@@ -75,12 +76,18 @@ export async function resolveDeliveredScaleFactor(opts: {
 }
 
 export async function resolveScreenSpaceMetrics(opts: {
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     /** iOS simulator UDID. */
     udid?: string;
     /** Android adb serial. */
     deviceId?: string;
 }): Promise<ScreenSpaceMetrics> {
+    if (opts.platform === "harmony") {
+        // hdc probes (screen size / density / status bar) are not wired yet —
+        // report unknown rather than borrowing Android's numbers. pixelScale
+        // undefined keeps coordinates in device-pixel space with no guessing.
+        return { platform: "harmony", topInset: 0, pixelScale: undefined };
+    }
     if (opts.platform === "ios") {
         // Independent probes, and both are cached — running them concurrently keeps the
         // cold-start cost of a layout call at one round trip rather than two.

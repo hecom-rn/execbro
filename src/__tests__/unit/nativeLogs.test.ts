@@ -40,6 +40,7 @@ function emptyDiscovery(): ListAllDevicesResult {
     return {
         ios: { available: true, simulators: [] },
         android: { available: true, emulators: [], physical: [] },
+            harmony: { available: false, targets: [] },
         summary: { booted: 0, total: 0 },
     };
 }

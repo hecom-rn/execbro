@@ -19,6 +19,7 @@ import { getScreenState } from "../core/screenState.js";
 import type { ScreenState, ScreenStatePressable } from "../core/screenState.js";
 import { screenStateToScreenSpace, screenStateToDeliveredPx } from "../core/screenSpace.js";
 import { resolveScreenSpaceMetrics } from "../core/screenSpaceDevice.js";
+import type { DevicePlatform } from "../core/types.js";
 
 export type OverlayVerdict =
     /** Nothing reachable at the target; an overlay is painted over it. Do not dispatch. */
@@ -171,7 +172,7 @@ export function decideOverlayBlock(
  */
 export async function checkOverlayBlocking(args: {
     query: OverlayGuardQuery;
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     udid?: string;
     deviceId?: string;
     deviceName?: string;

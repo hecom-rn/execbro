@@ -1,6 +1,6 @@
 import { connectedApps } from "../core/state.js";
 import type { CoordinateMissDiagnosis } from "./coordinateMiss.js";
-import type { ConnectedApp } from "../core/types.js";
+import type { ConnectedApp, DevicePlatform } from "../core/types.js";
 import type { OCRResult, OCRWord } from "../core/ocr.js";
 import { executeInApp } from "../core/executor.js";
 import { pressElement } from "../core/executor.js";
@@ -577,14 +577,15 @@ export function getAvailableStrategies(query: TapQuery, strategy: TapStrategy): 
 export function convertScreenshotToTapCoords(
     pixelX: number,
     pixelY: number,
-    platform: "ios" | "android",
+    platform: DevicePlatform,
     devicePixelRatio: number,
     scaleFactor: number = 1
 ): { x: number; y: number } {
     const deviceX = pixelX * scaleFactor;
     const deviceY = pixelY * scaleFactor;
 
-    if (platform === "android") {
+    if (platform !== "ios") {
+        // Android and harmony both speak device pixels.
         return { x: Math.round(deviceX), y: Math.round(deviceY) };
     }
 
@@ -1076,7 +1077,7 @@ async function tryFiberAtDepth(
 async function tryAccessibilityStrategy(
     query: TapQuery,
     index: number | undefined,
-    platform: "ios" | "android",
+    platform: DevicePlatform,
     udid?: string,
     sink?: EvidenceSink,
     signal?: AbortSignal,
@@ -1341,7 +1342,7 @@ async function tryAccessibilityStrategy(
  * `sink.ocr.bestCandidate` (matched text + tap coords) into the evidence sink,
  * which is serialized into the R2 failure bundle for diagnostics.
  */
-async function tryOcrStrategy(query: TapQuery, platform: "ios" | "android", udid?: string, sink?: EvidenceSink, signal?: AbortSignal, deviceId?: string, duration?: number): Promise<StrategyResult> {
+async function tryOcrStrategy(query: TapQuery, platform: DevicePlatform, udid?: string, sink?: EvidenceSink, signal?: AbortSignal, deviceId?: string, duration?: number): Promise<StrategyResult> {
     if (sink) sink.ocr.ran = true;
     const ocrStartedAt = Date.now();
     try {
@@ -1473,7 +1474,7 @@ async function tryOcrStrategy(query: TapQuery, platform: "ios" | "android", udid
 async function tryCoordinateStrategy(
     pixelX: number,
     pixelY: number,
-    platform: "ios" | "android",
+    platform: DevicePlatform,
     lastScreenshot?: {
         originalWidth: number;
         originalHeight: number;
@@ -1589,7 +1590,7 @@ const MAX_STRATEGY_MS: Record<string, number> = {
     coordinate: 8000
 };
 
-function maxStrategyMs(strategy: string, platform: "ios" | "android"): number {
+function maxStrategyMs(strategy: string, platform: DevicePlatform): number {
     if (strategy === "ocr" && platform === "android") return 9000;
     return MAX_STRATEGY_MS[strategy] ?? 5000;
 }
@@ -1657,7 +1658,7 @@ function computeMarkerPx(args: {
     strategy: string;
     input?: { x: number; y: number };
     convertedTo?: { x: number; y: number; unit: string };
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     screenshotScale: number;
     devicePixelRatio?: number;
     androidDensityScale?: number;
@@ -1704,7 +1705,7 @@ interface ArtifactCaptureContext {
     errorMessage?: string;
     errorCategory?: string;
     attempted: TapAttempt[];
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     iosDriver?: string;
     deviceName?: string;
     screenshotMeta?: { width: number; height: number };
@@ -2017,7 +2018,16 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                 error: formatResolverError(nativeResolved.error)
             };
         }
-        const platform: "ios" | "android" = nativeResolved.target.platform;
+        const platform: DevicePlatform = nativeResolved.target.platform;
+        if (platform === "harmony") {
+            // Native coordinate taps on harmony are not wired yet (hdc uiInput
+            // lands with the harmony tap strategies task).
+            return {
+                success: false,
+                query,
+                error: "Native coordinate taps on HarmonyOS are not supported yet."
+            };
+        }
         // Native mode shells out to adb/simctl with whatever identifier it
         // resolved. An app bound to no managed device would send those calls
         // to the backend's own default device — a different screen (verified
@@ -2146,7 +2156,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         };
     }
     const deviceNote = resolved.note;
-    const platform: "ios" | "android" = resolved.target.platform;
+    const platform: DevicePlatform = resolved.target.platform;
     let targetUdid: string | undefined = resolved.target.iosUdid;
     // Android's counterpart to targetUdid. Every adb call below takes it; without
     // it adb falls back to its own default device, which on a multi-emulator

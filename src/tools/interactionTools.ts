@@ -48,6 +48,7 @@ import { resolveDeviceTarget, formatResolverError } from "../core/deviceResolver
 import { PINCH_IN_DEFAULT_SPAN } from "../core/pinchThresholds.js";
 import { resolveAndroidDeviceId, resolveIosUdid, ANDROID_ARG_DESC, IOS_ARG_DESC } from "./_deviceArg.js";
 import type { ConnectedApp } from "../core/types.js";
+import type { DevicePlatform } from "../core/types.js";
 
 /**
  * Default swipe gesture duration. Android has always used 300ms; iOS passed no
@@ -387,7 +388,7 @@ export function registerInteractionTools(server: McpServer): void {
                     isError: true
                 };
             }
-            const resolvedPlatform: "ios" | "android" = resolved.target.platform;
+            const resolvedPlatform = resolved.target.platform;
             const resolvedUdid: string | undefined = resolved.target.iosUdid;
 
             const shouldVerify = verify !== false;
@@ -1069,7 +1070,7 @@ export function registerInteractionTools(server: McpServer): void {
                 };
             }
 
-            const { platform, iosUdid, androidSerial } = resolved.target;
+            const { platform, iosUdid, androidSerial, harmonyTargetKey } = resolved.target;
             const hasRnTarget = testID !== undefined || component !== undefined || textMatch !== undefined;
 
             if (native === true) {
@@ -1085,7 +1086,11 @@ export function registerInteractionTools(server: McpServer): void {
                 {
                     runOp: (op, query, dev) => runInputOp(op, query, dev),
                     typeHid: async (t) =>
-                        platform === "ios" ? await iosInputText(t, iosUdid) : await androidInputText(t, androidSerial),
+                        platform === "ios"
+                            ? await iosInputText(t, iosUdid)
+                            : platform === "harmony"
+                            ? { success: false, error: "native HID typing is not supported on harmony yet" }
+                            : await androidInputText(t, androidSerial),
                     raise: () => raiseKeyboard(platform, platform === "ios" ? iosUdid : androidSerial),
                     readNativeFields: () =>
                         readNativeFields(platform, platform === "ios" ? iosUdid : androidSerial)
@@ -1117,7 +1122,9 @@ export function registerInteractionTools(server: McpServer): void {
                 result,
                 { text, testID, component, textMatch, index, replace },
                 platform,
-                platform === "ios" ? iosUdid : androidSerial
+                platform === "ios" ? iosUdid : androidSerial,
+                platform === "android" ? androidSerial : undefined,
+                harmonyTargetKey
             );
         }
     );
@@ -1138,11 +1145,16 @@ export function registerInteractionTools(server: McpServer): void {
 async function nativeTextEntry(
     text: string,
     replace: boolean,
-    platform: "ios" | "android",
+    platform: DevicePlatform,
     iosUdid: string | undefined,
     androidSerial: string | undefined,
     device: string | undefined
 ): Promise<{ success: boolean; message: string }> {
+    if (platform === "harmony") {
+        // Native HID typing on harmony (uitest uiInput inputText) is not wired
+        // yet; refuse rather than route the text to an adb device.
+        return { success: false, message: "native text entry is not supported on harmony yet" };
+    }
     const resolvedUdid =
         platform === "ios" ? (iosUdid ?? (await getActiveOrBootedSimulatorUdid()) ?? undefined) : undefined;
     const resolvedSerial = platform === "android" ? (androidSerial ?? (await getDefaultAndroidDevice()) ?? undefined) : undefined;
@@ -1185,8 +1197,10 @@ async function decorateTextEntryTelemetry(
     response: { content: Array<{ type: "text"; text: string }>; isError?: boolean },
     r: TextEntryResult,
     args: Record<string, unknown>,
-    platform: "ios" | "android",
-    udid?: string
+    platform: DevicePlatform,
+    udid?: string,
+    androidSerial?: string,
+    harmonyTargetKey?: string
 ): Promise<Record<string, unknown>> {
     const out: Record<string, unknown> = { ...response };
 
@@ -1219,6 +1233,8 @@ async function decorateTextEntryTelemetry(
         outcome: axes.artifactOutcome,
         platform,
         udid,
+        deviceId: platform === "android" ? androidSerial : undefined,
+        hdcKey: platform === "harmony" ? harmonyTargetKey : undefined,
         predicate: args,
         errorMessage: r.error,
         errorCategory: categorizeError(r.error ?? "", context),

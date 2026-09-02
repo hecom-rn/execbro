@@ -1,6 +1,7 @@
 import { findDisconnectedDeviceName, getConnectedApps } from "./connection.js";
 import { listAllDevices, resetDeviceDiscoveryCache } from "./deviceDiscovery.js";
 import { listDevices, recordDevice } from "./projectMemory.js";
+import type { DevicePlatform } from "./types.js";
 
 export type DeviceTargetSource =
     | "registry"
@@ -13,11 +14,13 @@ export type DeviceTargetSource =
 export type NativeBinding = "adb" | "simctl" | "hdc" | "none";
 
 export interface DeviceTarget {
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     iosUdid?: string;
     androidSerial?: string;
     deviceName: string;
     source: DeviceTargetSource;
+    /** hdc target key when the resolved device is a HarmonyOS target. */
+    harmonyTargetKey?: string;
     /**
      * Proves the resolved device is reachable by a native backend. "none"
      * means the app is only connected through Metro (both adbSerial and
@@ -48,7 +51,7 @@ const STALE_INVENTORY_RETRY_CODES = new Set<DeviceResolverErrorCode>([
 export interface DeviceResolverError {
     code: DeviceResolverErrorCode;
     message: string;
-    candidates?: Array<{ name: string; platform: "ios" | "android"; identifier: string }>;
+    candidates?: Array<{ name: string; platform: DevicePlatform; identifier: string }>;
 }
 
 export type ResolveResult =
