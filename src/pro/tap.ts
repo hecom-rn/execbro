@@ -16,7 +16,7 @@ import { androidTap, androidFindElement } from "../core/android.js";
 import { compareScreenshots } from "./screenshot-diff.js";
 import { scanMetroPorts, fetchDevices, selectMainDevice } from "../core/metro.js";
 import { connectToDevice, clearReconnectionSuppression, getConnectedAppByDevice } from "../core/connection.js";
-import { resolveDeviceTarget, formatResolverError } from "../core/deviceResolver.js";
+import { resolveDeviceTarget, formatResolverError, checkNativeBackendAvailable } from "../core/deviceResolver.js";
 import { notifyDriverMissing } from "../core/logbox.js";
 import { captureFailureArtifact, type ArtifactOutcome, type CaptureSignals } from "../core/failureArtifact.js";
 import { diagnoseStaleness, recordScreen, type StalenessVerdict } from "../core/screenStaleness.js";
@@ -2018,6 +2018,14 @@ export async function tap(options: TapOptions): Promise<TapResult> {
             };
         }
         const platform: "ios" | "android" = nativeResolved.target.platform;
+        // Native mode shells out to adb/simctl with whatever identifier it
+        // resolved. An app bound to no managed device would send those calls
+        // to the backend's own default device — a different screen (verified
+        // 2026-09-01). Refuse instead.
+        const nativeBindingErr = checkNativeBackendAvailable(nativeResolved.target);
+        if (nativeBindingErr) {
+            return { success: false, query, error: formatResolverError(nativeBindingErr) };
+        }
         const nativeUdid: string | undefined = nativeResolved.target.iosUdid;
         const nativeSerial: string | undefined = nativeResolved.target.androidSerial;
 
@@ -2220,12 +2228,31 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         uiDriverMissing = !(await isUiDriverAvailable());
     }
 
+    // Native strategies end in adb/simctl calls carrying targetUdid/targetSerial.
+    // When the resolved app is bound to no managed device, those calls would
+    // land on the backend's own default device — a different screen (verified
+    // 2026-09-01: a harmony app matched by name while the native touch drove
+    // an attached Android emulator). Fiber stays available: it speaks CDP to
+    // the app itself and never touches a native backend.
+    const nativeBindingErr = checkNativeBackendAvailable(resolved.target);
+    const nativeBindingReason = nativeBindingErr
+        ? "Skipped — this app is not bound to an adb/simctl device, so native tap cannot reach it. Use CDP tools (get_screen_state, execute_in_app) or run the app on a managed device."
+        : null;
+
     // Filter strategies by available capabilities
     const filteredStrategies = strategies.filter((strat) => {
         if (strat === "fiber" && !hasMetro) {
             attempted.push({
                 strategy: "fiber",
                 reason: "Skipped — no Metro connection (required for fiber)",
+                outcome: "skipped"
+            });
+            return false;
+        }
+        if (nativeBindingReason && UI_DRIVER_REQUIRED_STRATEGIES.includes(strat)) {
+            attempted.push({
+                strategy: strat,
+                reason: nativeBindingReason,
                 outcome: "skipped"
             });
             return false;
@@ -2245,7 +2272,10 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         if (uiDriverMissing) {
             notifyDriverMissing("ios");
         }
-        const errorMessage = uiDriverMissing
+        const errorMessage = nativeBindingErr
+            ? formatResolverError(nativeBindingErr) +
+              (!hasMetro ? "\n\nMetro is also not connected, so the fiber strategy is unavailable too. Run scan_metro to connect." : "")
+            : uiDriverMissing
             ? `Cannot tap on iOS Simulator — ${getUiDriverInstallHint()}\n\nThe iOS UI driver is required for tapping, swiping, text input, and accessibility queries on iOS Simulators.\n\nAfter installing, retry the tap.`
             : "All strategies require Metro connection, which is unavailable.\n\nTo fix:\n1. Make sure your React Native app is running\n2. Run scan_metro to connect\n3. Or use tap(x, y, native=true) for coordinate-based taps";
         return {

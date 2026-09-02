@@ -44,13 +44,15 @@ jest.unstable_mockModule("../../core/exec.js", () => ({
 }));
 
 jest.unstable_mockModule("../../core/deviceResolver.js", () => ({
+    checkNativeBackendAvailable: () => null,
     resolveDeviceTarget: async () => ({
         ok: true,
         target: {
             platform: "android" as const,
             androidSerial: TARGET,
             deviceName: "sdk_gphone64_arm64",
-            source: "adb-serial" as const
+            source: "adb-serial" as const,
+            nativeBinding: "adb" as const
         }
     }),
     formatResolverError: (e: { message: string }) => e.message

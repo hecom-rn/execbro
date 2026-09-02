@@ -1,4 +1,8 @@
-import { resolveDeviceTarget, formatResolverError } from "../core/deviceResolver.js";
+import {
+    resolveDeviceTarget,
+    formatResolverError,
+    checkNativeBackendAvailable
+} from "../core/deviceResolver.js";
 import type { ResolveDeviceOptions } from "../core/deviceResolver.js";
 
 export type ToolErrorResponse = {
@@ -33,6 +37,10 @@ export async function resolveAndroidDeviceId(
     if (!resolved.ok) {
         return { ok: false, response: errResponse(`Error: ${formatResolverError(resolved.error)}`) };
     }
+    const bindingErr = checkNativeBackendAvailable(resolved.target);
+    if (bindingErr) {
+        return { ok: false, response: errResponse(`Error: ${formatResolverError(bindingErr)}`) };
+    }
     if (resolved.target.platform !== "android") {
         return {
             ok: false,
@@ -64,6 +72,10 @@ export async function resolveIosUdid(
     const resolved = await resolveDeviceTarget(hint, options);
     if (!resolved.ok) {
         return { ok: false, response: errResponse(`Error: ${formatResolverError(resolved.error)}`) };
+    }
+    const bindingErr = checkNativeBackendAvailable(resolved.target);
+    if (bindingErr) {
+        return { ok: false, response: errResponse(`Error: ${formatResolverError(bindingErr)}`) };
     }
     if (resolved.target.platform !== "ios") {
         return {
