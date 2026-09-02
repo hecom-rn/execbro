@@ -1207,13 +1207,31 @@ async function nativeTextEntry(
     device: string | undefined
 ): Promise<{ success: boolean; message: string }> {
     if (platform === "harmony") {
-        // No accessibility field read on harmony yet, so the typed value cannot
-        // be verified — type into the focused field and say exactly that.
+        // Type into the focused field, then verify through the dumpLayout
+        // tree (the focused TextInput's text is the read-back).
         const { harmonyInputFocusedText } = await import("../core/harmony.js");
         const r = await harmonyInputFocusedText(text, undefined);
-        return r.success
-            ? { success: true, message: "Typed text into the focused field (harmony — typed value not verified: no native field read yet)" }
-            : { success: false, message: r.error ?? "harmony native typing failed" };
+        if (!r.success) return { success: false, message: r.error ?? "harmony native typing failed" };
+        // The typed text commits to the UI tree a beat after uiInput returns;
+        // poll briefly before concluding anything about the value.
+        const settle = (ms: number) => new Promise((res) => setTimeout(res, ms));
+        let focused: { text: string | null; focused: boolean } | undefined;
+        // uiInput text APPENDS to the field's existing content (verified on
+        // device: successive writes accumulate), so match on the tail.
+        for (let attempt = 0; attempt < 4 && !focused; attempt++) {
+            await settle(400);
+            const read = await readNativeFields("harmony", undefined);
+            focused = read.fields.find((f) => f.focused);
+            if (focused && (focused.text ?? "").endsWith(text)) break;
+        }
+        if (focused && (focused.text ?? "").endsWith(text)) {
+            return { success: true, message: `Typed and verified in the focused field (harmony): "${text}"` };
+        }
+        const seen = focused ? `focused field reads "${focused.text}"` : "no focused field found in the dump";
+        return {
+            success: true,
+            message: `Typed into the focused field (harmony) — verification inconclusive: ${seen}`
+        };
     }
     const resolvedUdid =
         platform === "ios" ? (iosUdid ?? (await getActiveOrBootedSimulatorUdid()) ?? undefined) : undefined;

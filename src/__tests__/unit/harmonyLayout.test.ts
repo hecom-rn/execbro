@@ -55,3 +55,27 @@ describe("findLayoutNode", () => {
         expect(findLayoutNode(root, { testID: "nope" })).toBeNull();
     });
 });
+
+import { findLayoutNodes } from "../../core/harmony.js";
+
+describe("findLayoutNodes", () => {
+    const root = parseDumpLayout(SAMPLE)!;
+
+    it("collects every text match, depth-first", () => {
+        const all = findLayoutNodes(root, { text: "分析" });
+        // "销售漏斗分析" contains 分析; the root and FrameNode have no text
+        expect(all.length).toBeGreaterThanOrEqual(1);
+        expect(all.some((n) => n.text.includes("销售漏斗分析"))).toBe(true);
+    });
+
+    it("collects testID matches", () => {
+        expect(findLayoutNodes(root, { testID: "tabbarMine" }).map((n) => n.bounds)).toEqual([[1120, 1968, 200, 152]]);
+    });
+
+    it("exposes the focused attribute from the dump", () => {
+        const focused = JSON.parse(SAMPLE.replace('"clickable":"true"', '"clickable":"true","focused":"true"'));
+        const r = parseDumpLayout(JSON.stringify(focused));
+        expect(r!.children[0].focused).toBe(true);
+        expect(r!.children[1].focused).toBe(false);
+    });
+});

@@ -174,7 +174,7 @@ export function parseBmDumpList(stdout: string): string[] {
 
 /** Accepts hidumper RenderService `activeMode:WxH` / `Physical size:WxH` shapes. */
 export function parseScreenSize(stdout: string): { width: number; height: number } | null {
-    const patterns = [/activeMode:(\d+)x(\d+)/, /renderSize:(\d+)x(\d+)/, /Physical size:(\d+)x(\d+)/];
+    const patterns = [/activeMode:\s*(\d+)x(\d+)/, /renderSize:\s*(\d+)x(\d+)/, /Physical size:\s*(\d+)x(\d+)/];
     for (const re of patterns) {
         const m = stdout.match(re);
         if (m) return { width: Number(m[1]), height: Number(m[2]) };
@@ -192,6 +192,7 @@ export interface HarmonyLayoutNode {
     /** Device-pixel [x, y, width, height]. */
     bounds: [number, number, number, number];
     clickable: boolean;
+    focused: boolean;
     bundleName?: string;
     children: HarmonyLayoutNode[];
 }
@@ -209,6 +210,7 @@ function parseLayoutNode(raw: any): HarmonyLayoutNode | null {
         type: String(raw.attributes?.type ?? ""),
         bounds,
         clickable: String(raw.attributes?.clickable ?? "") === "true",
+        focused: String(raw.attributes?.focused ?? "") === "true",
         bundleName: raw.attributes?.bundleName ? String(raw.attributes.bundleName) : undefined,
         children: Array.isArray(raw.children)
             ? raw.children.map(parseLayoutNode).filter(Boolean)
@@ -223,6 +225,24 @@ export function parseDumpLayout(jsonText: string): HarmonyLayoutNode | null {
     } catch {
         return null;
     }
+}
+
+/** All nodes matching a testID or a text substring, depth-first. */
+export function findLayoutNodes(
+    root: HarmonyLayoutNode,
+    opts: { testID?: string; text?: string }
+): HarmonyLayoutNode[] {
+    const wantKey = opts.testID ? String(opts.testID) : "";
+    const wantText = opts.text ? String(opts.text).trim() : "";
+    const out: HarmonyLayoutNode[] = [];
+    const stack = [root];
+    while (stack.length) {
+        const n = stack.pop() as HarmonyLayoutNode;
+        if (wantKey && n.key === wantKey) out.push(n);
+        else if (!wantKey && wantText && n.text.trim() && n.text.trim().includes(wantText)) out.push(n);
+        stack.push(...n.children);
+    }
+    return out;
 }
 
 /** Depth-first search for a node matching a testID or an exact text. */

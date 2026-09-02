@@ -90,9 +90,32 @@ export type NativeFieldsReader = (
 export const readNativeFields: NativeFieldsReader = async (platform, deviceId) => {
     try {
         if (platform === "harmony") {
-            // The harmony accessibility dump (uitest dumpLayout) is not wired
-            // yet; report unknown rather than shelling out to adb.
-            return { fields: [], error: "native field read is not supported on harmony yet" };
+            // dumpLayout is harmony's accessibility tree: RN testIDs surface
+            // as `key`, and input fields are the nodes that carry a testID,
+            // hold focus, or are text-typed. Verified against RNOH 0.77
+            // (bounds are device pixels; focused is exposed).
+            const { harmonyDumpLayout } = await import("./harmony.js");
+            const dump = await harmonyDumpLayout(deviceId);
+            if (!dump.success || !dump.root) {
+                return { fields: [], error: dump.error ?? "uitest dumpLayout failed" };
+            }
+            // Input-typed nodes only. Container nodes carry window-level
+            // focused:"true" and internal ArkUI keys, so key/focus heuristics
+            // return dozens of empty containers instead of the field (verified
+            // on RNOH 0.77, where the search field is type "TextInput").
+            const out: NativeField[] = [];
+            const stack = [dump.root];
+            while (stack.length) {
+                const n = stack.pop()!;
+                const t = n.type.toLowerCase();
+                const isInput =
+                    t.includes("textinput") || t.includes("textfield") || t.includes("textarea");
+                if (isInput) {
+                    out.push({ id: n.key || null, text: n.text, focused: n.focused });
+                }
+                stack.push(...n.children);
+            }
+            return { fields: out };
         }
         if (platform === "ios") {
             if (!deviceId) return { fields: [], error: "no simulator UDID" };

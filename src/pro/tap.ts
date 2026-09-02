@@ -1082,20 +1082,94 @@ async function tryAccessibilityStrategy(
     sink?: EvidenceSink,
     signal?: AbortSignal,
     deviceId?: string,
-    duration?: number
+    duration?: number,
+    hdcKey?: string
 ): Promise<StrategyResult> {
+    const hasTestID = !!query.testID;
+    const hasText = !!query.text;
     if (platform === "harmony") {
-        // The harmony accessibility dump (uitest dumpLayout) is not wired yet —
-        // fiber and OCR remain available; report the skip instead of running
-        // the adb tree by accident.
-        return { success: false, reason: "accessibility strategy not supported on harmony yet" };
+        // dumpLayout IS harmony's accessibility tree: RN testIDs surface as
+        // node `key`s with device-pixel bounds (verified on RNOH 0.77).
+        if (!hasTestID && !hasText) {
+            return {
+                success: false,
+                reason: "No text or testID for accessibility search"
+            };
+        }
+        const { harmonyDumpLayout, findLayoutNodes, harmonyTap, harmonyLongPress } =
+            await import("../core/harmony.js");
+        const dump = await harmonyDumpLayout(hdcKey);
+        if (!dump.success || !dump.root) {
+            return { success: false, reason: dump.error ?? "uitest dumpLayout failed" };
+        }
+        const matches = findLayoutNodes(dump.root, {
+            testID: hasTestID ? query.testID : undefined,
+            text: hasText ? query.text : undefined
+        }).filter((m) => m.bounds[2] > 0 && m.bounds[3] > 0);
+
+        // Parent containers swallow child text; the most specific (smallest,
+        // not contained by another match) node is the real target.
+        const specific = matches.filter(
+            (m) => !matches.some(
+                (o) => o !== m &&
+                    o.bounds[0] <= m.bounds[0] && o.bounds[1] <= m.bounds[1] &&
+                    o.bounds[0] + o.bounds[2] >= m.bounds[0] + m.bounds[2] &&
+                    o.bounds[1] + o.bounds[3] >= m.bounds[1] + m.bounds[3]
+            )
+        );
+
+        if (sink && specific.length) {
+            sink.accessibility.elements = specific.slice(0, 50).map((m) => ({
+                label: m.text || undefined,
+                testID: m.key || undefined,
+                frame: { x: m.bounds[0], y: m.bounds[1], width: m.bounds[2], height: m.bounds[3] }
+            }));
+        }
+        if (specific.length === 0) {
+            return { success: false, reason: "No harmony accessibility match" };
+        }
+        if (specific.length > 1 && index === undefined) {
+            return {
+                success: false,
+                reason: `Ambiguous: ${specific.length} elements match this query — use index= to pick one`,
+                matches: specific.map((m, i) => ({
+                    index: i,
+                    component: m.type,
+                    text: m.text,
+                    testID: m.key || null,
+                    x: m.bounds[0] + Math.round(m.bounds[2] / 2),
+                    y: m.bounds[1] + Math.round(m.bounds[3] / 2)
+                })),
+                ambiguous: true
+            };
+        }
+        const match = specific[index ?? 0];
+        if (!match) {
+            return { success: false, reason: `Index ${index} out of bounds (${specific.length} matches)` };
+        }
+        const cx = match.bounds[0] + Math.round(match.bounds[2] / 2);
+        const cy = match.bounds[1] + Math.round(match.bounds[3] / 2);
+        const a11yTap = duration
+            ? await harmonyLongPress(cx, cy, duration, hdcKey)
+            : await harmonyTap(cx, cy, hdcKey);
+        if (!a11yTap.success) {
+            return {
+                success: false,
+                reason: `Accessibility found "${match.text || match.key}" but tap failed: ${a11yTap.error}`
+            };
+        }
+        return {
+            success: true,
+            reason: "Tapped via harmony accessibility",
+            pressed: match.key || match.text || match.type,
+            text: match.text || undefined,
+            component: match.key || undefined,
+            convertedTo: { x: cx, y: cy, unit: "pixels" }
+        };
     }
     if (sink) sink.accessibility.ran = true;
     const startedAt = Date.now();
     try {
-        const hasTestID = !!query.testID;
-        const hasText = !!query.text;
-
         if (!hasTestID && !hasText) {
             return {
                 success: false,
@@ -2478,7 +2552,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                     break;
                 case "accessibility":
                     result = await withCancelableTimeout(
-                        (signal) => tryAccessibilityStrategy(query, index, platform, targetUdid, evidence, signal, targetSerial, options.duration),
+                        (signal) => tryAccessibilityStrategy(query, index, platform, targetUdid, evidence, signal, targetSerial, options.duration, targetHdcKey),
                         budget,
                         `accessibility`
                     );
@@ -2507,7 +2581,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                                 replayResult = replayStrat === "fiber"
                                     ? await withTimeout(tryFiberStrategy(query, index, maxTraversalDepth, evidence, deviceName, options.duration !== undefined), replayBudget, `fiber`)
                                     : await withCancelableTimeout(
-                                        (signal) => tryAccessibilityStrategy(query, index, platform, targetUdid, evidence, signal, targetSerial, options.duration),
+                                        (signal) => tryAccessibilityStrategy(query, index, platform, targetUdid, evidence, signal, targetSerial, options.duration, targetHdcKey),
                                         replayBudget,
                                         `accessibility`
                                     );

@@ -1,7 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerToolWithTelemetry } from "../core/register.js";
-import { resolveAndroidDeviceId, resolveIosUdid, DEVICE_ARG_DESC } from "./_deviceArg.js";
+import { resolveAndroidDeviceId, resolveIosUdid, resolveHarmonyTargetKey, DEVICE_ARG_DESC } from "./_deviceArg.js";
+import { harmonyScreenshot } from "../core/harmony.js";
 import {
     getBundleStatusWithErrors,
     getBundleErrors,
@@ -287,7 +288,7 @@ export function registerBundleTools(server: McpServer): void {
                         "If true, empty the bundle error buffer after reading it. Use once a bundling error is fixed so the next call reflects only fresh errors. The errors are still returned in this response."
                     ),
                 platform: z
-                    .enum(["ios", "android"])
+                    .enum(["ios", "android", "harmony"])
                     .optional()
                     .describe(
                         "Platform for screenshot fallback when no errors are captured via CDP. Required to enable fallback."
@@ -361,7 +362,11 @@ export function registerBundleTools(server: McpServer): void {
                     originalHeight?: number;
                 };
     
-                if (platform === "android") {
+                if (platform === "harmony") {
+                    const r = await resolveHarmonyTargetKey(deviceId);
+                    if (!r.ok) return r.response;
+                    screenshotResult = await harmonyScreenshot(undefined, r.targetKey ?? undefined);
+                } else if (platform === "android") {
                     const r = await resolveAndroidDeviceId(deviceId);
                     if (!r.ok) return r.response;
                     screenshotResult = await androidScreenshot(undefined, r.serial);
