@@ -40,3 +40,4 @@ Thumbs.db
 # old apex TXT record on execbro.com or verification fails.
 *.pem
 mcp-registry-key.hex
+*.tgz

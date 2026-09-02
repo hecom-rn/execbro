@@ -1,6 +1,6 @@
 {
     "name": "execbro",
-    "version": "2.9.5",
+    "version": "2.10.0-harmony.1",
     "mcpName": "com.execbro/execbro",
     "description": "ExecBro: React Native AI debugger and devtools MCP server. Gives AI agents eyes and hands in your running app (logs, network, state inspection, tap, screenshot).",
     "type": "module",
@@ -61,7 +61,6 @@
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.25.1",
         "fast-xml-parser": "^5.3.3",
-        "node-easyocr": "^1.0.9",
         "pixelmatch": "^7.1.0",
         "posthog-node": "^5.28.11",
         "sharp": "^0.35.3",
@@ -76,5 +75,8 @@
         "nodemon": "^3.1.11",
         "ts-jest": "^29.4.6",
         "typescript": "^5.9.3"
+    },
+    "optionalDependencies": {
+        "node-easyocr": "^1.0.9"
     }
 }
