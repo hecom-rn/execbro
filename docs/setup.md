@@ -157,6 +157,22 @@ Android works out of the box — all device control tools use ADB, which ships w
 adb devices
 ```
 
+## HarmonyOS
+
+HarmonyOS device control needs `hdc` (HarmonyOS Device Connector), which ships with [DevEco Studio](https://developer.huawei.com/consumer/cn/deveco-studio/) or the OpenHarmony SDK. Verify it is available:
+
+```bash
+hdc list targets
+```
+
+To let execbro discover an RN HarmonyOS app through Metro, forward the app's bundler port (8081 by default) to this machine:
+
+```bash
+hdc fport tcp:8082 tcp:8081
+```
+
+Then `scan_metro` as usual — the app is detected as platform `harmony` (device visible in `list_devices` under "HarmonyOS devices (hdc)").
+
 ## iOS Simulator — UI Automation Setup
 
 iOS UI automation tools (tap, swipe, text input, accessibility queries) require a UI driver. Install one of the following:

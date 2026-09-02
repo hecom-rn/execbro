@@ -493,8 +493,8 @@ Suggested prompt the user can paste to trigger this:
  * `instructions`. Keep this as the single source of truth.
  */
 export const DECISION_TREE: string = [
-    "Primary tools: scan_metro, get_logs / search_logs, ios_screenshot / android_screenshot, tap, get_screen_state, get_screen_layout.",
-    "Platform-specific ios_* / android_* tools (ios_button, android_key_event, ios_open_url, etc.) are FALLBACKS for non-React or native-only flows — prefer the cross-platform primary tools above whenever possible. input_text covers native-only text entry too, via native:true.",
+    "Primary tools: scan_metro, get_logs / search_logs, ios_screenshot / android_screenshot / harmony_screenshot, tap, get_screen_state, get_screen_layout.",
+    "Platform-specific ios_* / android_* / harmony_* tools (ios_button, android_key_event, harmony_launch_app, ios_open_url, etc.) are FALLBACKS for non-React or native-only flows — prefer the cross-platform primary tools above whenever possible. input_text covers native-only text entry too, via native:true. HarmonyOS (hdc) targets are supported: cross-platform tools address them automatically once the app is connected through Metro.",
     "",
     "Call get_usage_guide(topic=...) for end-to-end workflows. Available topics:",
     "  setup       — session setup (scan_metro, connect_metro, ensure_connection)",

@@ -108,6 +108,16 @@ swipe with startX=200 startY=600 endX=200 endY=200 burst=true # Catches overscro
 | `android_long_press`       | Long press at raw coordinates, for holds with no RN connection (prefer `tap` with `duration`) |
 | `android_key_event`        | Send key events (HOME, BACK, ENTER, etc.)                   |
 
+## HarmonyOS (hdc)
+
+Requires `hdc` (HarmonyOS Device Connector, ships with DevEco Studio / the OpenHarmony SDK) in PATH and a connected device or emulator. Forward Metro over `hdc fport tcp:<local> tcp:<remote>` so execbro can discover the app.
+
+- `harmony_screenshot` — capture the screen (device pixels)
+- `harmony_key_event` — Back/Home/Enter/Del/Esc/Power/VolumeUp/VolumeDown
+- `harmony_launch_app` / `harmony_terminate_app` / `harmony_list_packages` — app management via `aa`/`bm`
+
+Cross-platform tools (`tap`, `swipe`, `input_text`, `ocr_screenshot`, `get_logs(source="native")`, and all CDP-level tools) support HarmonyOS targets automatically once the app is connected through Metro. Limitations: pinch is unsupported; tap's accessibility strategy is not available yet (fiber and OCR are); the typed value cannot be verified on the native text path.
+
 ## iOS (Simulator)
 
 | Tool                   | Description                                               |
