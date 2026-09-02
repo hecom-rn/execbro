@@ -15,6 +15,7 @@
 import { execFileAsync, quoteForDeviceShell, withCancelableTimeout } from "./exec.js";
 import type { EventLevel, RawLogLine } from "./logEvents.js";
 import { buildShellArgs } from "./harmony.js";
+import type { HarmonyLayoutNode } from "./harmony.js";
 
 const MAX_BUFFER = 32 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 8000;
@@ -78,18 +79,34 @@ export async function fetchHarmonyLines(opts: {
  * The real bundle name of the foreground RN app, read off the dumpLayout
  * tree's bundleName attribute. Needed because Metro reports the app id as an
  * "undefinedAppName@<ts>" blob on RNOH, which pidof can never resolve.
+ *
+ * The dump contains every window, not just the app's: the system launcher
+ * (com.ohos.sceneboard) appears alongside the RN app and which one traversal
+ * meets first is not stable. A window node carries `focused` exactly when it
+ * is foreground, so prefer the focused window's bundle name; fall back to the
+ * first seen only when nothing reports focus.
  */
+export function pickForegroundBundleName(root: HarmonyLayoutNode): string | undefined {
+    let first: string | undefined;
+    const stack = [root];
+    while (stack.length) {
+        const n = stack.pop()!;
+        if (n.bundleName) {
+            if (n.focused) return n.bundleName;
+            first ??= n.bundleName;
+        }
+        // Reversed push keeps the DFS in document order so the `first`
+        // fallback really is the first bundle name in the dump.
+        stack.push(...[...n.children].reverse());
+    }
+    return first;
+}
+
 export async function resolveHarmonyBundleName(targetKey?: string): Promise<string | undefined> {
     const { harmonyDumpLayout } = await import("./harmony.js");
     const dump = await harmonyDumpLayout(targetKey);
     if (!dump.success || !dump.root) return undefined;
-    const stack = [dump.root];
-    while (stack.length) {
-        const n = stack.pop()!;
-        if (n.bundleName) return n.bundleName;
-        stack.push(...n.children);
-    }
-    return undefined;
+    return pickForegroundBundleName(dump.root);
 }
 
 /** Resolve the app's live pid by bundle name, or undefined when not running (verify V2). */

@@ -354,6 +354,37 @@ export function registerConnectionTools(server: McpServer): void {
             await Promise.all(apps.map(({ app }) => awaitAppDetection(app, 3500)));
             apps = getConnectedApps();
 
+            // HarmonyOS apps never report their name to Metro (the app id is
+            // an "undefinedAppName@<ts>" blob on RNOH), but the real bundle
+            // name is readable off the dumpLayout tree. Resolve it once per
+            // app run (cached until a reconnect recreates the entry) so the
+            // listing shows "cn.hecom.cloud.har" instead of a device-name
+            // fallback. Gated on harmonyTargetKey, not app.platform — the
+            // hilog-based platform detection can lose the race on a fresh
+            // connect, but harmonyTargetKey is only ever set for harmony.
+            // Capped and parallel like the detection probe above; a slow hdc
+            // call degrades to the old fallback, never blocks.
+            await Promise.all(
+                apps
+                    .filter(
+                        ({ app }) =>
+                            !app.harmonyBundleName &&
+                            app.harmonyTargetKey !== undefined &&
+                            (!app.deviceInfo.appId ||
+                                app.deviceInfo.appId.startsWith("undefinedAppName@"))
+                    )
+                    .map(async ({ app }) => {
+                        const { resolveHarmonyBundleName } = await import(
+                            "../core/logSourceHarmony.js"
+                        );
+                        const bundle = await Promise.race([
+                            resolveHarmonyBundleName(app.harmonyTargetKey),
+                            new Promise<undefined>((r) => setTimeout(r, 3000)),
+                        ]);
+                        if (bundle) app.harmonyBundleName = bundle;
+                    })
+            );
+
             if (apps.length === 0) {
                 return {
                     content: [
@@ -371,7 +402,10 @@ export function registerConnectionTools(server: McpServer): void {
             const deviceLines = apps.map(({ app, isConnected }, i) => {
                 const name = app.deviceInfo.deviceName || app.deviceInfo.title;
                 const resolvedAppId = displayAppId(
-                    app.deviceInfo.appId || app.deviceInfo.title.split(" (")[0] || undefined,
+                    app.harmonyBundleName ||
+                        app.deviceInfo.appId ||
+                        app.deviceInfo.title.split(" (")[0] ||
+                        undefined,
                     name
                 );
                 const appId = resolvedAppId.appId +
@@ -411,10 +445,13 @@ export function registerConnectionTools(server: McpServer): void {
             ].join("\n");
 
             // Structured payload — downstream tools and tests can read this
-            // without parsing the prose above.
+            // without parsing the prose above. appId mirrors the prose line:
+            // the resolved bundle name when harmony attribution succeeded,
+            // the raw Metro id otherwise (callers keying on the blob stay
+            // unaffected; it is only hidden when we know something better).
             const structured = apps.map(({ app, isConnected }) => ({
                 deviceName: app.deviceInfo.deviceName,
-                appId: app.deviceInfo.appId,
+                appId: app.harmonyBundleName ?? app.deviceInfo.appId,
                 platform: app.platform,
                 port: app.port,
                 simulatorUdid: app.simulatorUdid ?? null,

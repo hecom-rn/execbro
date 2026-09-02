@@ -142,6 +142,8 @@ export interface LogTarget {
     identity?: AppIdentity;
     /** Where `identity` came from — memory-sourced ids can be stale. */
     identitySource?: "live" | "memory";
+    /** The live ConnectedApp behind this target, when one is connected. */
+    app?: ConnectedApp;
 }
 
 /**
@@ -260,6 +262,7 @@ export async function resolveLogTargets(device?: string): Promise<LogTarget[]> {
             adbSerial: row.adbSerial ?? app?.adbSerial,
             identity: live ?? remembered,
             identitySource: live ? "live" : remembered ? "memory" : undefined,
+            app,
         });
     }
     return targets;
@@ -302,7 +305,11 @@ async function fetchForTarget(
             if (!identity.pid || identity.appId.startsWith("undefinedAppName@")) {
                 const { resolveHarmonyBundleName } = await import("./logSourceHarmony.js");
                 const bundle = await resolveHarmonyBundleName(target.hdcKey);
-                if (bundle) identity.appId = bundle;
+                if (bundle) {
+                    identity.appId = bundle;
+                    // Cache for get_apps' display layer so both surfaces agree.
+                    if (target.app) target.app.harmonyBundleName = bundle;
+                }
             }
             identity.pid = await resolveHarmonyPid(identity.appId, target.hdcKey);
             lines = await fetchHarmonyLines({ targetKey: target.hdcKey, sinceTs });

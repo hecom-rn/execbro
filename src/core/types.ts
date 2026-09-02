@@ -62,6 +62,12 @@ export interface ConnectedApp {
     // device reachable over hdc. Populated at connect time by platform
     // detection + hdc inventory correlation.
     harmonyTargetKey?: string;
+    // Real bundle name (e.g. "cn.hecom.cloud.har") resolved from the
+    // dumpLayout tree on HarmonyOS. Metro reports the app id as an
+    // "undefinedAppName@<ts>" blob on RNOH; this is what native log
+    // attribution resolves per call, cached here so get_apps can show the
+    // real identity instead of a device-name fallback.
+    harmonyBundleName?: string;
     lastScreenshot?: {
         originalWidth: number;
         originalHeight: number;
