@@ -13,6 +13,10 @@ jest.unstable_mockModule("../../core/ios.js", () => ({
     listIOSSimulators: listIOSSimulatorsMock,
     findSimulatorByName: jest.fn()
 }));
+jest.unstable_mockModule("../../core/harmony.js", () => ({
+    isHdcAvailable: jest.fn(async () => false),
+    listHarmonyTargets: jest.fn(async () => [])
+}));
 jest.unstable_mockModule("../../core/android.js", () => ({
     listAndroidDevices: listAndroidDevicesMock,
     getAndroidEmulatorAvds: getAndroidEmulatorAvdsMock,

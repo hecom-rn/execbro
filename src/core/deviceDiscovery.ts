@@ -1,5 +1,6 @@
 import { listIOSSimulators } from "./ios.js";
 import { listAndroidDevices, getAndroidEmulatorAvds, getAdbIdForAvd } from "./android.js";
+import { isHdcAvailable, listHarmonyTargets } from "./harmony.js";
 
 export interface IosSimulatorRow {
     name: string;
@@ -124,12 +125,35 @@ function computeSummary(result: Omit<ListAllDevicesResult, "summary">): ListAllD
     const iosBooted = result.ios.simulators.filter((s) => s.state === "booted").length;
     const androidRunning = result.android.emulators.filter((e) => e.state === "running").length;
     const androidPhysicalOnline = result.android.physical.filter((p) => p.state === "device").length;
-    const booted = iosBooted + androidRunning + androidPhysicalOnline;
+    const harmonyConnected = result.harmony.targets.filter((t) => t.state === "connected").length;
+    const booted = iosBooted + androidRunning + androidPhysicalOnline + harmonyConnected;
     const total =
         result.ios.simulators.length +
         result.android.emulators.length +
-        result.android.physical.length;
+        result.android.physical.length +
+        result.harmony.targets.length;
     return { booted, total };
+}
+
+/**
+ * HarmonyOS devices over hdc. hdc absent is a normal state, not an error —
+ * the section simply reports available:false so list_devices can say
+ * "hdc not installed" instead of pretending the platform does not exist.
+ */
+async function discoverHarmony(): Promise<ListAllDevicesResult["harmony"]> {
+    if (!(await isHdcAvailable())) {
+        return { available: false, targets: [] };
+    }
+    try {
+        const targets = (await listHarmonyTargets()).map((t) => ({ ...t, name: t.key }));
+        return { available: true, targets };
+    } catch (e) {
+        return {
+            available: false,
+            error: e instanceof Error ? e.message : String(e),
+            targets: []
+        };
+    }
 }
 
 export interface ListAllDevicesOptions {
@@ -143,9 +167,7 @@ export async function listAllDevices(
         return cache.result;
     }
 
-    const [ios, android] = await Promise.all([discoverIos(), discoverAndroid()]);
-    // hdc inventory is wired by the harmony discovery task; absent until then.
-    const harmony: ListAllDevicesResult["harmony"] = { available: false, targets: [] };
+    const [ios, android, harmony] = await Promise.all([discoverIos(), discoverAndroid(), discoverHarmony()]);
     const partial = { ios, android, harmony };
     const result: ListAllDevicesResult = {
         ...partial,

@@ -25,7 +25,7 @@ jest.unstable_mockModule("../../core/projectMemory.js", () => ({
 const empty = {
     ios: { available: true, simulators: [] },
     android: { available: true, emulators: [], physical: [] },
-    summary: { booted: 0, total: 0 },
+    harmony: { available: false, targets: [] }, summary: { booted: 0, total: 0 },
 };
 
 const withBootedSim = {

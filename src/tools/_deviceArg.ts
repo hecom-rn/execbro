@@ -103,4 +103,32 @@ export async function resolveIosUdid(
 export const DEVICE_ALL_DESC = "RN device name (substring). Omit for all devices; see get_apps.";
 export const DEVICE_ARG_DESC = "RN device name (substring). Omit for default; see get_apps.";
 export const ANDROID_ARG_DESC = "Android target: adb serial, emulator name, or RN device substring. Omit for first.";
+
+/**
+ * Resolve a harmony hint (hdc target key, RN device substring) into the
+ * canonical hdc target key. Mirrors resolveAndroidDeviceId. Empty hint →
+ * undefined so the caller's "use the only/first connected target" path runs.
+ */
+export async function resolveHarmonyTargetKey(
+    hint?: string
+): Promise<{ ok: true; targetKey: string | undefined } | { ok: false; response: ToolErrorResponse }> {
+    if (!hint) return { ok: true, targetKey: undefined };
+    const resolved = await resolveDeviceTarget(hint);
+    if (!resolved.ok) {
+        return { ok: false, response: errResponse(`Error: ${formatResolverError(resolved.error)}`) };
+    }
+    const bindingErr = checkNativeBackendAvailable(resolved.target);
+    if (bindingErr) {
+        return { ok: false, response: errResponse(`Error: ${formatResolverError(bindingErr)}`) };
+    }
+    if (resolved.target.platform !== "harmony") {
+        return {
+            ok: false,
+            response: errResponse(
+                `Error: "${hint}" resolved to a ${resolved.target.platform} device (${resolved.target.deviceName}) — this tool only targets HarmonyOS devices.`
+            )
+        };
+    }
+    return { ok: true, targetKey: resolved.target.harmonyTargetKey };
+}
 export const IOS_ARG_DESC = "iOS target: UDID, simulator name, or RN device substring. Omit for booted.";

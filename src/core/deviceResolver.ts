@@ -7,6 +7,7 @@ export type DeviceTargetSource =
     | "registry"
     | "udid"
     | "adb-serial"
+    | "hdc-key"
     | "name-match"
     | "default";
 
@@ -96,9 +97,14 @@ function ok(target: DeviceTarget, note?: string): ResolveResult {
     return note ? { ok: true, target, note } : { ok: true, target };
 }
 
-function nativeBindingOf(app: { simulatorUdid?: string; adbSerial?: string }): NativeBinding {
+function nativeBindingOf(app: {
+    simulatorUdid?: string;
+    adbSerial?: string;
+    harmonyTargetKey?: string;
+}): NativeBinding {
     if (app.simulatorUdid) return "simctl";
     if (app.adbSerial) return "adb";
+    if (app.harmonyTargetKey) return "hdc";
     return "none";
 }
 
@@ -229,6 +235,22 @@ async function resolveDeviceTargetInner(
                 nativeBinding: "adb"
             });
         }
+        // Exact hdc target key match. A loopback key ("127.0.0.1:5555") or a
+        // connector serial is unambiguous — accept it before name matching.
+        const invH = await listAllDevices();
+        const hdc = invH.harmony.targets.find((t) => t.key === trimmed && t.state === "connected");
+        if (hdc) {
+            const registryApp = getConnectedApps().find(
+                (e) => e.app.platform === "harmony" && e.app.harmonyTargetKey === trimmed
+            );
+            return ok({
+                platform: "harmony",
+                harmonyTargetKey: hdc.key,
+                deviceName: registryApp?.app.deviceInfo.deviceName || hdc.key,
+                source: "hdc-key",
+                nativeBinding: "hdc"
+            });
+        }
         // No exact serial match. An `emulator-NNNN` argument is unambiguously a
         // serial and nothing else, so it keeps its precise error instead of
         // falling through to name matching and reporting a generic miss.
@@ -313,11 +335,27 @@ async function resolveDeviceTargetInner(
         const androidPhysicalMatches = inv.android.physical.filter(
             (p) => p.state === "device" && normalizeName(p.model).includes(needle)
         );
+        const harmonyMatches = inv.harmony.targets.filter(
+            (t) => t.state === "connected" && normalizeName(t.key).includes(needle)
+        );
 
         const totalMatches =
-            iosBootedMatches.length + androidRunningMatches.length + androidPhysicalMatches.length;
+            iosBootedMatches.length +
+            androidRunningMatches.length +
+            androidPhysicalMatches.length +
+            harmonyMatches.length;
 
         if (totalMatches === 1) {
+            if (harmonyMatches.length === 1) {
+                const t = harmonyMatches[0];
+                return ok({
+                    platform: "harmony",
+                    harmonyTargetKey: t.key,
+                    deviceName: t.key,
+                    source: "name-match",
+                    nativeBinding: "hdc"
+                });
+            }
             if (iosBootedMatches.length === 1) {
                 const s = iosBootedMatches[0];
                 return ok({
@@ -351,7 +389,8 @@ async function resolveDeviceTargetInner(
             const candidates = [
                 ...iosBootedMatches.map((s) => ({ name: s.name, platform: "ios" as const, identifier: s.udid })),
                 ...androidRunningMatches.map((e) => ({ name: e.name, platform: "android" as const, identifier: e.serial ?? e.name })),
-                ...androidPhysicalMatches.map((p) => ({ name: p.model, platform: "android" as const, identifier: p.serial }))
+                ...androidPhysicalMatches.map((p) => ({ name: p.model, platform: "android" as const, identifier: p.serial })),
+                ...harmonyMatches.map((t) => ({ name: t.key, platform: "harmony" as const, identifier: t.key }))
             ];
             return err(
                 "MULTIPLE_DEVICES_MATCH",
@@ -382,7 +421,8 @@ async function resolveDeviceTargetInner(
     const bootedSims = inv.ios.simulators.filter((s) => s.state === "booted");
     const runningEmus = inv.android.emulators.filter((e) => e.state === "running");
     const onlinePhys = inv.android.physical.filter((p) => p.state === "device");
-    const totalRunning = bootedSims.length + runningEmus.length + onlinePhys.length;
+    const harmonyConnected = inv.harmony.targets.filter((t) => t.state === "connected");
+    const totalRunning = bootedSims.length + runningEmus.length + onlinePhys.length + harmonyConnected.length;
 
     if (totalRunning === 0) {
         // Final fallback: if a single RN app is connected (e.g. physical iOS
@@ -409,7 +449,8 @@ async function resolveDeviceTargetInner(
         const candidates = [
             ...bootedSims.map((s) => ({ name: s.name, platform: "ios" as const, identifier: s.udid })),
             ...runningEmus.map((e) => ({ name: e.name, platform: "android" as const, identifier: e.serial ?? e.name })),
-            ...onlinePhys.map((p) => ({ name: p.model, platform: "android" as const, identifier: p.serial }))
+            ...onlinePhys.map((p) => ({ name: p.model, platform: "android" as const, identifier: p.serial })),
+            ...harmonyConnected.map((t) => ({ name: t.key, platform: "harmony" as const, identifier: t.key }))
         ];
 
         try {
@@ -450,6 +491,10 @@ async function resolveDeviceTargetInner(
         const s = bootedSims[0];
         return ok({ platform: "ios", iosUdid: s.udid, deviceName: s.name, source: "default", nativeBinding: "simctl" });
     }
+    if (harmonyConnected.length === 1) {
+        const t = harmonyConnected[0];
+        return ok({ platform: "harmony", harmonyTargetKey: t.key, deviceName: t.key, source: "default", nativeBinding: "hdc" });
+    }
     if (runningEmus.length === 1) {
         const e = runningEmus[0];
         return ok({
@@ -488,7 +533,7 @@ export async function resolveDeviceTarget(
     if (result.ok) {
         try {
             const t = result.target;
-            const identifier = t.iosUdid ?? t.androidSerial ?? t.deviceName;
+            const identifier = t.iosUdid ?? t.androidSerial ?? t.harmonyTargetKey ?? t.deviceName;
             let appId: string | undefined;
             try {
                 appId = getConnectedApps().find(

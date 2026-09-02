@@ -69,6 +69,19 @@ export function registerDeviceTools(server: McpServer): void {
                     const match = bySerial.get(phys.serial);
                     if (match) phys.rnConnected = match;
                 }
+                const byHdcKey = new Map<string, { deviceName: string; port: number }>();
+                for (const { app } of apps) {
+                    if (app.harmonyTargetKey) {
+                        byHdcKey.set(app.harmonyTargetKey, {
+                            deviceName: app.deviceInfo.deviceName,
+                            port: app.port
+                        });
+                    }
+                }
+                for (const t of inventory.harmony.targets) {
+                    const match = byHdcKey.get(t.key);
+                    if (match) t.rnConnected = match;
+                }
             }
 
             const lines: string[] = [];
@@ -109,6 +122,20 @@ export function registerDeviceTools(server: McpServer): void {
                 }
             } else {
                 lines.push(`\nAndroid: unavailable (${inventory.android.error ?? "unknown"})`);
+            }
+
+            if (inventory.harmony.available) {
+                lines.push("\nHarmonyOS devices (hdc):");
+                if (inventory.harmony.targets.length === 0) {
+                    lines.push("  (none — connect a device or emulator, e.g. `hdc fport tcp:8081 tcp:8081` for Metro)");
+                } else {
+                    for (const t of inventory.harmony.targets) {
+                        const rn = t.rnConnected ? `  [RN connected on port ${t.rnConnected.port}]` : "";
+                        lines.push(`  ${t.key} — ${t.kind} — ${t.state}${rn}`);
+                    }
+                }
+            } else {
+                lines.push(`\nHarmonyOS: hdc not installed or unavailable${inventory.harmony.error ? ` (${inventory.harmony.error})` : ""}`);
             }
 
             return {
