@@ -9,12 +9,25 @@ export type DeviceTargetSource =
     | "name-match"
     | "default";
 
+/** Which native backend can actually reach the resolved device, if any. */
+export type NativeBinding = "adb" | "simctl" | "hdc" | "none";
+
 export interface DeviceTarget {
     platform: "ios" | "android";
     iosUdid?: string;
     androidSerial?: string;
     deviceName: string;
     source: DeviceTargetSource;
+    /**
+     * Proves the resolved device is reachable by a native backend. "none"
+     * means the app is only connected through Metro (both adbSerial and
+     * simulatorUdid empty) — native tools must refuse it rather than let adb
+     * fall through to its own default device, which on a multi-device setup
+     * is a different physical screen (verified 2026-09-01: a harmony app
+     * matching "emulator" by substring drove the attached Android emulator).
+     * CDP-only tools ignore this field; they never touch a native backend.
+     */
+    nativeBinding?: NativeBinding;
 }
 
 export type DeviceResolverErrorCode =
@@ -22,7 +35,8 @@ export type DeviceResolverErrorCode =
     | "NO_DEVICES_FOUND"
     | "DEVICE_NOT_FOUND"
     | "SIMULATOR_NOT_BOOTED"
-    | "CONFLICTING_IDENTIFIERS";
+    | "CONFLICTING_IDENTIFIERS"
+    | "NATIVE_BACKEND_UNAVAILABLE";
 
 /** Resolution failures that a stale device inventory could plausibly explain. */
 const STALE_INVENTORY_RETRY_CODES = new Set<DeviceResolverErrorCode>([
@@ -75,8 +89,37 @@ function err(
     return { ok: false, error: { code, message, candidates } };
 }
 
-function ok(target: DeviceTarget): ResolveResult {
-    return { ok: true, target };
+function ok(target: DeviceTarget, note?: string): ResolveResult {
+    return note ? { ok: true, target, note } : { ok: true, target };
+}
+
+function nativeBindingOf(app: { simulatorUdid?: string; adbSerial?: string }): NativeBinding {
+    if (app.simulatorUdid) return "simctl";
+    if (app.adbSerial) return "adb";
+    return "none";
+}
+
+/**
+ * The error a NATIVE tool must return when its device hint resolved to an app
+ * that no native backend can reach. Not part of STALE_INVENTORY_RETRY_CODES:
+ * a fresh inventory will not change the app's binding.
+ */
+export function nativeBindingUnavailableError(target: DeviceTarget): DeviceResolverError {
+    return {
+        code: "NATIVE_BACKEND_UNAVAILABLE",
+        message: `App "${target.deviceName}" is only connected through Metro and is not bound to any adb/simctl device, so native tools (screenshot, touch, keys, packages) cannot reach it. ` +
+            "Use CDP-level tools instead (logs, network, get_screen_state, inspect_*, execute_in_app), or run the app on a managed device."
+    };
+}
+
+/**
+ * Guard for native tool paths: refuses a resolved target that no native
+ * backend can reach. Call at every point that is about to shell out to
+ * adb/simctl/hdc — a missing serial there would fall through to the backend's
+ * own default device, which is not the device the caller asked about.
+ */
+export function checkNativeBackendAvailable(target: DeviceTarget): DeviceResolverError | null {
+    return target.nativeBinding === "none" ? nativeBindingUnavailableError(target) : null;
 }
 
 /**
@@ -129,7 +172,8 @@ async function resolveDeviceTargetInner(
             platform: "ios",
             iosUdid: sim.udid,
             deviceName: sim.name,
-            source: "udid"
+            source: "udid",
+            nativeBinding: "simctl"
         });
     }
 
@@ -165,7 +209,8 @@ async function resolveDeviceTargetInner(
                 platform: "android",
                 androidSerial: trimmed,
                 deviceName: registryApp?.app.deviceInfo.deviceName || emu.name,
-                source: "adb-serial"
+                source: "adb-serial",
+                nativeBinding: "adb"
             });
         }
         const phys = inv.android.physical.find((p) => p.serial === trimmed);
@@ -177,7 +222,8 @@ async function resolveDeviceTargetInner(
                 platform: "android",
                 androidSerial: trimmed,
                 deviceName: registryApp?.app.deviceInfo.deviceName || phys.model,
-                source: "adb-serial"
+                source: "adb-serial",
+                nativeBinding: "adb"
             });
         }
         // No exact serial match. An `emulator-NNNN` argument is unambiguously a
@@ -191,16 +237,24 @@ async function resolveDeviceTargetInner(
         }
     }
 
-    // Step 3: Registry substring match.
+    // Step 3: Registry match (normalized-name equality first, substring as
+    // fallback). A substring hit is accepted when unique but flagged — an
+    // agent passing "emulator" while a device literally named "emulator" and
+    // an "emulator-5554" are both connected must land on the exact one.
     if (trimmed) {
         const apps = getConnectedApps();
         const needle = normalizeName(trimmed);
-        const matches = apps.filter((entry) => {
-            const name = normalizeName(entry.app.deviceInfo.deviceName);
-            return name.includes(needle);
-        });
+        const hits = apps
+            .map((entry) => ({ entry, name: normalizeName(entry.app.deviceInfo.deviceName) }))
+            .filter(({ name }) => name.includes(needle));
+        const exactHits = hits.filter(({ name }) => name === needle);
+        const matches = exactHits.length > 0 ? exactHits : hits;
         if (matches.length === 1) {
-            const m = matches[0].app;
+            const m = matches[0].entry.app;
+            let note: string | undefined;
+            if (exactHits.length === 0) {
+                note = `Matched device "${m.deviceInfo.deviceName}" by substring. Pass the full device name to rule out ambiguity.`;
+            }
             // When the iOS app's UDID hasn't been backfilled yet (the
             // findSimulatorByName race during connection), look it up on
             // demand. Without this, downstream callers default to whichever
@@ -218,19 +272,23 @@ async function resolveDeviceTargetInner(
                     // best-effort; fall through with undefined udid
                 }
             }
-            return ok({
-                platform: m.platform,
-                iosUdid,
-                androidSerial: m.adbSerial,
-                deviceName: m.deviceInfo.deviceName,
-                source: "registry"
-            });
+            return ok(
+                {
+                    platform: m.platform,
+                    iosUdid,
+                    androidSerial: m.adbSerial,
+                    deviceName: m.deviceInfo.deviceName,
+                    source: "registry",
+                    nativeBinding: nativeBindingOf(m)
+                },
+                note
+            );
         }
         if (matches.length > 1) {
             return err(
                 "MULTIPLE_DEVICES_MATCH",
                 `"${trimmed}" matches multiple connected devices. Pass a more specific identifier (full name, UDID, or adb serial).`,
-                matches.map((m) => ({
+                matches.map(({ entry: m }) => ({
                     name: m.app.deviceInfo.deviceName,
                     platform: m.app.platform,
                     identifier: m.app.simulatorUdid ?? m.app.adbSerial ?? m.app.deviceInfo.deviceName
@@ -263,7 +321,8 @@ async function resolveDeviceTargetInner(
                     platform: "ios",
                     iosUdid: s.udid,
                     deviceName: s.name,
-                    source: "name-match"
+                    source: "name-match",
+                    nativeBinding: "simctl"
                 });
             }
             if (androidRunningMatches.length === 1) {
@@ -272,7 +331,8 @@ async function resolveDeviceTargetInner(
                     platform: "android",
                     androidSerial: e.serial ?? undefined,
                     deviceName: e.name,
-                    source: "name-match"
+                    source: "name-match",
+                    nativeBinding: "adb"
                 });
             }
             const p = androidPhysicalMatches[0];
@@ -280,7 +340,8 @@ async function resolveDeviceTargetInner(
                 platform: "android",
                 androidSerial: p.serial,
                 deviceName: p.model,
-                source: "name-match"
+                source: "name-match",
+                nativeBinding: "adb"
             });
         }
         if (totalMatches > 1) {
@@ -331,7 +392,8 @@ async function resolveDeviceTargetInner(
                 iosUdid: m.simulatorUdid,
                 androidSerial: m.adbSerial,
                 deviceName: m.deviceInfo.deviceName,
-                source: "default"
+                source: "default",
+                nativeBinding: nativeBindingOf(m)
             });
         }
         return err(
@@ -364,6 +426,7 @@ async function resolveDeviceTargetInner(
                             androidSerial: match.platform === "android" ? match.identifier : undefined,
                             deviceName: match.name,
                             source: "default",
+                            nativeBinding: match.platform === "ios" ? "simctl" : "adb",
                         },
                     };
                 }
@@ -382,7 +445,7 @@ async function resolveDeviceTargetInner(
 
     if (bootedSims.length === 1) {
         const s = bootedSims[0];
-        return ok({ platform: "ios", iosUdid: s.udid, deviceName: s.name, source: "default" });
+        return ok({ platform: "ios", iosUdid: s.udid, deviceName: s.name, source: "default", nativeBinding: "simctl" });
     }
     if (runningEmus.length === 1) {
         const e = runningEmus[0];
@@ -390,11 +453,12 @@ async function resolveDeviceTargetInner(
             platform: "android",
             androidSerial: e.serial ?? undefined,
             deviceName: e.name,
-            source: "default"
+            source: "default",
+            nativeBinding: "adb"
         });
     }
     const p = onlinePhys[0];
-    return ok({ platform: "android", androidSerial: p.serial, deviceName: p.model, source: "default" });
+    return ok({ platform: "android", androidSerial: p.serial, deviceName: p.model, source: "default", nativeBinding: "adb" });
 }
 
 /**
