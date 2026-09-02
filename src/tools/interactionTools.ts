@@ -754,13 +754,17 @@ export function registerInteractionTools(server: McpServer): void {
             }
 
             if (resolved.target.platform !== "android") {
+                const perPlatform = resolved.target.platform === "harmony"
+                    ? "Error: pinch is not available on HarmonyOS. uinput's pinch injection silently no-ops on " +
+                      "the emulator (verified on device 2026-09-02), and per-finger injection through separate " +
+                      "uinput sessions cannot form one gesture. A UiDriver (ArkXTest) harness is the likely path."
+                    : "Error: pinch is not available on iOS yet. Multi-touch on the iOS simulator needs an " +
+                      "Indigo HID helper that does not ship in any released idb build; it is planned as a " +
+                      "follow-up. Android emulators are supported today.";
                 return {
                     content: [{
                         type: "text",
-                        text:
-                            "Error: pinch is not available on iOS yet. Multi-touch on the iOS simulator needs an " +
-                            "Indigo HID helper that does not ship in any released idb build; it is planned as a " +
-                            "follow-up. Android emulators are supported today.",
+                        text: perPlatform,
                     }],
                     isError: true,
                 };

@@ -227,22 +227,38 @@ export function parseDumpLayout(jsonText: string): HarmonyLayoutNode | null {
     }
 }
 
-/** All nodes matching a testID or a text substring, depth-first. */
+/**
+ * All nodes matching a testID or a text substring, best match first.
+ *
+ * dumpLayout keys are not always verbatim RN testIDs: RNOH appends suffixes
+ * on device (verified: fiber testID "tabbarMenuPage_Item_X" surfaces as
+ * "..._X_业务对象"). Matching is therefore graded — exact key, then substring
+ * either way, with a text agreement bump — and better matches sort first.
+ */
 export function findLayoutNodes(
     root: HarmonyLayoutNode,
     opts: { testID?: string; text?: string }
 ): HarmonyLayoutNode[] {
     const wantKey = opts.testID ? String(opts.testID) : "";
     const wantText = opts.text ? String(opts.text).trim() : "";
-    const out: HarmonyLayoutNode[] = [];
+    const scored: Array<{ n: HarmonyLayoutNode; score: number }> = [];
     const stack = [root];
     while (stack.length) {
         const n = stack.pop() as HarmonyLayoutNode;
-        if (wantKey && n.key === wantKey) out.push(n);
-        else if (!wantKey && wantText && n.text.trim() && n.text.trim().includes(wantText)) out.push(n);
+        let score = 0;
+        if (wantKey && n.key) {
+            if (n.key === wantKey) score += 3;
+            // One direction only: RNOH appends suffixes to the dump key
+            // ("..._X_业务对象") but never truncates it, so the dump key must
+            // CONTAIN the testID. The reverse would let a short unrelated key
+            // ("tabbarMenu") match any longer query.
+            else if (n.key.includes(wantKey)) score += 2;
+        }
+        if (wantText && n.text.trim().includes(wantText)) score += 1;
+        if (score > 0) scored.push({ n, score });
         stack.push(...n.children);
     }
-    return out;
+    return scored.sort((a, b) => b.score - a.score).map((s) => s.n);
 }
 
 /** Depth-first search for a node matching a testID or an exact text. */
