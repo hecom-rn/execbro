@@ -50,6 +50,7 @@ import { resolveAndroidDeviceId, resolveIosUdid, resolveHarmonyTargetKey, ANDROI
 import type { ConnectedApp } from "../core/types.js";
 import type { DevicePlatform } from "../core/types.js";
 import { harmonyKeyEvent, HARMONY_KEY_EVENTS } from "../core/harmony.js";
+import { readKeyboardState } from "../core/keyboardMetrics.js";
 
 /**
  * Default swipe gesture duration. Android has always used 300ms; iOS passed no
@@ -1039,17 +1040,24 @@ export function registerInteractionTools(server: McpServer): void {
         },
         async ({ device }) => {
             const result = await dismissKeyboard(device);
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: result.success
-                            ? `Dismissed keyboard (nativeTag ${result.nativeTag}).`
-                            : `Error: ${result.error}`
-                    }
-                ],
-                isError: !result.success
-            };
+            if (!result.success) {
+                return {
+                    content: [{ type: "text", text: `Error: ${result.error}` }],
+                    isError: true
+                };
+            }
+            // The blur succeeded at React level, but whether the keyboard
+            // actually came down is only knowable when the Keyboard module is
+            // reachable (it is not on harmony/new-arch bundles where the metro
+            // registry probe fails). Verify before claiming; report honestly
+            // when we cannot.
+            const state = await readKeyboardState(device);
+            const text = state.error
+                ? `Blurred the focused input (nativeTag ${result.nativeTag}). Keyboard visibility could NOT be verified (${state.error}) — the keyboard may still be on screen.`
+                : state.visible
+                ? `Blurred the focused input (nativeTag ${result.nativeTag}), but the keyboard still reports visible (${state.height}).`
+                : `Dismissed keyboard (nativeTag ${result.nativeTag}; visibility read-back confirms it is down).`;
+            return { content: [{ type: "text", text }] };
         }
     );
     
