@@ -174,6 +174,7 @@ export async function checkOverlayBlocking(args: {
     query: OverlayGuardQuery;
     platform: DevicePlatform;
     udid?: string;
+    hdcKey?: string;
     deviceId?: string;
     deviceName?: string;
 }): Promise<OverlayVerdict | null> {
@@ -182,6 +183,7 @@ export async function checkOverlayBlocking(args: {
             getScreenState({ device: args.deviceName }),
             resolveScreenSpaceMetrics({
                 platform: args.platform,
+                hdcKey: args.hdcKey,
                 udid: args.udid,
                 deviceId: args.deviceId
             })

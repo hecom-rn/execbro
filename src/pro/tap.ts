@@ -1788,7 +1788,8 @@ async function diagnoseCoordinateMiss(args: {
         const metrics = await resolveScreenSpaceMetrics({
             platform: app?.platform ?? "ios",
             udid: app?.simulatorUdid,
-            deviceId: app?.adbSerial
+            deviceId: app?.adbSerial,
+            hdcKey: app?.harmonyTargetKey
         });
 
         const normalised = screenStateToDeliveredPx(
@@ -2321,6 +2322,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                         platform,
                         udid: targetUdid,
                         deviceId: resolved.target.androidSerial,
+                        hdcKey: resolved.target.harmonyTargetKey,
                         deviceName
                     }),
                     guardBudget,

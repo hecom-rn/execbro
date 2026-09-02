@@ -1,6 +1,7 @@
 import { imageBuffer } from "../core/state.js";
 import { iosScreenshot } from "../core/ios.js";
 import { androidScreenshot } from "../core/android.js";
+import { harmonyScreenshot } from "../core/harmony.js";
 import { compareScreenshots } from "./screenshot-diff.js";
 import {
     type TapScreenshot,
@@ -139,9 +140,9 @@ export async function captureScreenshot(
         // null here reads as "cannot verify" downstream, never as success.
         const result = platform === "ios"
             ? await iosScreenshot(undefined, udid)
-            : platform === "android"
-            ? await androidScreenshot(undefined, deviceId)
-            : null;
+            : platform === "harmony"
+            ? await harmonyScreenshot(undefined, hdcKey)
+            : await androidScreenshot(undefined, deviceId);
         if (!result || !result.success || !result.data) return null;
         return {
             buffer: result.data,

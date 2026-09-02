@@ -1,7 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerToolWithTelemetry } from "../core/register.js";
-import { resolveAndroidDeviceId, resolveIosUdid, ANDROID_ARG_DESC, IOS_ARG_DESC } from "./_deviceArg.js";
+import { resolveAndroidDeviceId, resolveIosUdid, resolveHarmonyTargetKey, ANDROID_ARG_DESC, IOS_ARG_DESC } from "./_deviceArg.js";
+import { harmonyScreenshot } from "../core/harmony.js";
+import { getConnectedApps } from "../core/connection.js";
 import { recordScreenMetrics } from "../core/projectMemory.js";
 import {
     iosScreenshot,
@@ -588,6 +590,83 @@ export function registerScreenshotTools(server: McpServer): void {
             };
         }
     );
+    // Tool: HarmonyOS screenshot
+    registerToolWithTelemetry(
+        server,
+        "harmony_screenshot",
+        {
+            description: "Take a screenshot from a HarmonyOS device/emulator over hdc. Returns the image plus the connected RN app's screen summary (active route, tappable elements in device-pixel coordinates) when one is connected on the target.\n" +
+                "PURPOSE: Visual snapshot of a HarmonyOS screen, with tap-ready coordinates when the RN app is connected through Metro.\n" +
+                "WHEN TO USE: Same workflows as android_screenshot but for HarmonyOS devices reached via hdc (list_devices shows them).\n" +
+                "WORKFLOW: harmony_screenshot -> pick element -> tap(x, y) or tap(testID=...) -> harmony_screenshot to verify.\n" +
+                "LIMITATIONS: Requires hdc in PATH and a connected target. Coordinates are device pixels — pass them to tap() unchanged.",
+            inputSchema: {
+                outputPath: z.string().optional().describe("Optional path to save the screenshot."),
+                device: z.string().optional().describe("HarmonyOS target: hdc target key or RN device substring. Omit for the only/first connected target.")
+            }
+        },
+        async ({ outputPath, device }) => {
+            const resolved = await resolveHarmonyTargetKey(device);
+            if (!resolved.ok) return resolved.response;
+            const targetKey = resolved.targetKey ?? undefined;
+
+            const result = await harmonyScreenshot(outputPath, targetKey);
+            if (!result.success) {
+                return {
+                    content: [{ type: "text" as const, text: `Error: ${result.error}` }],
+                    isError: true
+                };
+            }
+
+            if (result.data) {
+                const pixelWidth = result.originalWidth || 0;
+                const pixelHeight = result.originalHeight || 0;
+                let infoText = `Screenshot captured (${pixelWidth}x${pixelHeight} device pixels). Coordinates are device pixels — pass them to tap() unchanged.`;
+
+                // Enrich from the RN app linked to this hdc target, if any.
+                const targetApp = getConnectedApps().find(
+                    (e) => e.app.platform === "harmony" &&
+                        (targetKey === undefined || e.app.harmonyTargetKey === targetKey)
+                )?.app;
+                if (targetApp) {
+                    targetApp.lastScreenshot = {
+                        originalWidth: pixelWidth,
+                        originalHeight: pixelHeight,
+                        scaleFactor: result.scaleFactor || 1,
+                    };
+                    infoText += `\nRN app connected: ${targetApp.deviceInfo.appId ?? targetApp.deviceInfo.deviceName} (route details via get_screen_state).`;
+                }
+
+                imageBuffer.add({
+                    id: `harmony-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                    image: result.data,
+                    timestamp: Date.now(),
+                    source: "harmony_screenshot",
+                    metadata: {
+                        width: pixelWidth,
+                        height: pixelHeight,
+                        scaleFactor: result.scaleFactor || 1,
+                        platform: "harmony",
+                    },
+                });
+
+                return {
+                    content: [
+                        { type: "text" as const, text: infoText },
+                        {
+                            type: "image" as const,
+                            data: result.data.toString("base64"),
+                            mimeType: "image/jpeg"
+                        }
+                    ]
+                };
+            }
+
+            return {
+                content: [{ type: "text" as const, text: `Screenshot saved to: ${result.result}` }]
+            };
+        }
+    );
     // Tool: Get images from shared image buffer
     registerToolWithTelemetry(
         server,
@@ -682,7 +761,7 @@ export function registerScreenshotTools(server: McpServer): void {
                 "BAD: ocr_screenshot used just to view the screen — plain ios_screenshot / android_screenshot is cheaper when you don't need OCR text.\n" +
                 "SOURCE: for RN screens, inspect_at_point(x, y) returns the file and line that render an element — no OCR needed.\n",
             inputSchema: {
-                platform: z.enum(["ios", "android"]).describe("Platform to capture screenshot from"),
+                platform: z.enum(["ios", "android", "harmony"]).describe("Platform to capture screenshot from"),
                 deviceId: z
                     .string()
                     .optional()
@@ -692,7 +771,11 @@ export function registerScreenshotTools(server: McpServer): void {
         async ({ platform, deviceId }) => {
             try {
                 let screenshotResult;
-                if (platform === "android") {
+                if (platform === "harmony") {
+                    const r = await resolveHarmonyTargetKey(deviceId);
+                    if (!r.ok) return r.response;
+                    screenshotResult = await harmonyScreenshot(undefined, r.targetKey ?? undefined);
+                } else if (platform === "android") {
                     const r = await resolveAndroidDeviceId(deviceId);
                     if (!r.ok) return r.response;
                     screenshotResult = await androidScreenshot(undefined, r.serial);

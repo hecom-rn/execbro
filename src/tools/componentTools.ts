@@ -53,7 +53,8 @@ async function resolveScreenSpaceMetricsFor(device?: string): Promise<ScreenSpac
     return resolveScreenSpaceMetrics({
         platform: app.platform,
         udid: app.simulatorUdid,
-        deviceId: app.adbSerial
+        deviceId: app.adbSerial,
+        hdcKey: app.harmonyTargetKey
     });
 }
 

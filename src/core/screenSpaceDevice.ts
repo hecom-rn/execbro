@@ -7,6 +7,7 @@
 
 import type { DevicePlatform } from "./types.js";
 import type { ScreenSpaceMetrics } from "./screenSpace.js";
+import { harmonyGetScreenSize } from "./harmony.js";
 import { computeDeliveredDownscale } from "./screenSpace.js";
 import { getIOSSafeAreaTop, getDevicePixelRatio, getIOSScreenPixelSize } from "./ios.js";
 import {
@@ -55,11 +56,15 @@ export async function resolveDeliveredScaleFactor(opts: {
     platform: DevicePlatform;
     udid?: string;
     deviceId?: string;
+    /** HarmonyOS hdc target key. */
+    hdcKey?: string;
 }): Promise<number | undefined> {
     try {
         const pixelSize =
             opts.platform === "ios"
                 ? await getIOSScreenPixelSize(opts.udid).catch(() => null)
+                : opts.platform === "harmony"
+                ? await harmonyGetScreenSize(opts.hdcKey).catch(() => null)
                 : await androidGetScreenSize(opts.deviceId)
                       .then((s) => (s && s.success && s.width && s.height ? { width: s.width, height: s.height } : null))
                       .catch(() => null);
@@ -81,12 +86,20 @@ export async function resolveScreenSpaceMetrics(opts: {
     udid?: string;
     /** Android adb serial. */
     deviceId?: string;
+    /** HarmonyOS hdc target key. */
+    hdcKey?: string;
 }): Promise<ScreenSpaceMetrics> {
     if (opts.platform === "harmony") {
-        // hdc probes (screen size / density / status bar) are not wired yet —
-        // report unknown rather than borrowing Android's numbers. pixelScale
-        // undefined keeps coordinates in device-pixel space with no guessing.
-        return { platform: "harmony", topInset: 0, pixelScale: undefined };
+        // Density/status-bar probes are not wired for harmony yet, so the
+        // dp->px device scale is unknown. The delivered downscale, however,
+        // depends only on the pixel size, which harmonyGetScreenSize provides.
+        const size = await harmonyGetScreenSize(opts.hdcKey).catch(() => null);
+        const downscale = size ? computeDeliveredDownscale(size.width, size.height) : null;
+        return {
+            platform: "harmony",
+            topInset: 0,
+            pixelScale: downscale && downscale > 0 ? downscale : undefined
+        };
     }
     if (opts.platform === "ios") {
         // Independent probes, and both are cached — running them concurrently keeps the
