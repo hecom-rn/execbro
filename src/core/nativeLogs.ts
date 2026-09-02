@@ -17,10 +17,12 @@ import { isRelevant } from "./logRelevance.js";
 import { fetchAndroidLines, resolveAndroidPid } from "./logSourceAndroid.js";
 import { fetchIosLines, resolveIosProcessName } from "./logSourceIos.js";
 import type { ConnectedApp } from "./types.js";
+import { fetchHarmonyLines, resolveHarmonyPid } from "./logSourceHarmony.js";
+import type { DevicePlatform } from "./types.js";
 
-/** simulatorUdid ?? adbSerial. Never deviceName — two sims can share a name. */
+/** simulatorUdid ?? adbSerial ?? harmonyTargetKey. Never deviceName — two sims can share a name. */
 export function deviceKeyOf(app: ConnectedApp): string | undefined {
-    return app.simulatorUdid ?? app.adbSerial;
+    return app.simulatorUdid ?? app.adbSerial ?? app.harmonyTargetKey;
 }
 
 /**
@@ -57,7 +59,7 @@ export function identityFromApp(
  */
 export function identityFromMemory(
     deviceKey: string,
-    platform: "ios" | "android",
+    platform: DevicePlatform,
     deviceName?: string
 ): AppIdentity | undefined {
     const devices = listDevices();
@@ -128,12 +130,14 @@ function describeBelowFloor(dropped: DraftEvent[]): BelowFloor | undefined {
 }
 
 export interface LogTarget {
-    /** simulatorUdid (iOS) | adb serial (Android). The buffer key. */
+    /** simulatorUdid (iOS) | adb serial (Android) | hdc target key (harmony). The buffer key. */
     deviceKey: string;
     deviceName: string;
-    platform: "ios" | "android";
+    platform: DevicePlatform;
     /** Android only — what `adb -s` accepts. */
     adbSerial?: string;
+    /** HarmonyOS only — what `hdc -t` accepts. */
+    hdcKey?: string;
     /** Absent when the app has never connected on this device. */
     identity?: AppIdentity;
     /** Where `identity` came from — memory-sourced ids can be stale. */
@@ -188,7 +192,7 @@ export async function resolveLogTargets(device?: string): Promise<LogTarget[]> {
     }
 
     const discovered = await listAllDevices();
-    const rows: Array<{ deviceKey: string; name: string; platform: "ios" | "android"; adbSerial?: string }> = [];
+    const rows: Array<{ deviceKey: string; name: string; platform: DevicePlatform; adbSerial?: string; hdcKey?: string }> = [];
 
     for (const sim of discovered.ios.simulators) {
         if (sim.state !== "booted") continue;
@@ -201,6 +205,10 @@ export async function resolveLogTargets(device?: string): Promise<LogTarget[]> {
     for (const phys of discovered.android.physical) {
         if (phys.state !== "device") continue;
         rows.push({ deviceKey: phys.serial, name: phys.model, platform: "android", adbSerial: phys.serial });
+    }
+    for (const target of discovered.harmony.targets) {
+        if (target.state !== "connected") continue;
+        rows.push({ deviceKey: target.key, name: target.name, platform: "harmony", hdcKey: target.key });
     }
 
     const targets: LogTarget[] = [];
@@ -271,6 +279,8 @@ async function fetchForTarget(
             // event names its own owner, so this stays useful.
             const lines = target.platform === "android"
                 ? await fetchAndroidLines({ serial: target.adbSerial, sinceTs, crashOnly: true })
+                : target.platform === "harmony"
+                ? await fetchHarmonyLines({ targetKey: target.hdcKey, sinceTs })
                 : await fetchIosLines({ udid: target.deviceKey, sinceTs, minMessageType: "fault" });
             const drafts = groupIntoEvents(lines, {
                 deviceKey: target.deviceKey,
@@ -285,7 +295,10 @@ async function fetchForTarget(
 
         const identity = { ...target.identity };
         let lines: RawLogLine[];
-        if (target.platform === "android") {
+        if (target.platform === "harmony") {
+            identity.pid = await resolveHarmonyPid(identity.appId, target.hdcKey);
+            lines = await fetchHarmonyLines({ targetKey: target.hdcKey, sinceTs });
+        } else if (target.platform === "android") {
             // Re-resolved every call: the pid changes on every app restart,
             // and is absent entirely after a crash.
             identity.pid = await resolveAndroidPid(identity.appId, target.adbSerial);
