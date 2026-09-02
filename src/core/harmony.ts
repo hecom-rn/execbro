@@ -357,6 +357,26 @@ export async function harmonyInputText(
     }
 }
 
+/**
+ * Types into whatever field currently has focus via `uitest uiInput text` —
+ * no coordinates needed. Verify the focused-variant behaviour on device (V2);
+ * the coordinate form (harmonyInputText) is the fallback.
+ */
+export async function harmonyInputFocusedText(text: string, targetKey?: string): Promise<HdcResult> {
+    const missing = await requireHdc();
+    if (missing) return missing;
+    const device = targetKey ?? (await getDefaultHarmonyTarget());
+    if (!device) return { success: false, error: "No HarmonyOS device connected." };
+    try {
+        const { stdout } = await runHdc(
+            buildShellArgs(device, ["uitest", "uiInput", "text", escapeHarmonyShellText(text)])
+        );
+        return { success: true, result: stdout.trim() };
+    } catch (e) {
+        return errFrom(e, "uiInput text");
+    }
+}
+
 export async function harmonyLaunchApp(
     bundleName: string,
     abilityName?: string,

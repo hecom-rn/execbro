@@ -498,6 +498,7 @@ export function registerInteractionTools(server: McpServer): void {
                     platform: resolvedPlatform,
                     udid: resolvedUdid,
                     deviceId: resolved.target.androidSerial,
+                    hdcKey: resolved.target.harmonyTargetKey,
                 })
                 ?? (connectedApps.values().next().value as ConnectedApp | undefined)?.lastScreenshot?.scaleFactor
                 ?? 1;
@@ -524,6 +525,14 @@ export function registerInteractionTools(server: McpServer): void {
                 // to the same 300ms flick.
                 const duration = (durationMs ?? SWIPE_DEFAULT_DURATION_MS) / 1000;
                 driverResult = await iosSwipe(start.x, start.y, end.x, end.y, { duration, delta, udid: resolvedUdid });
+            } else if (resolvedPlatform === "harmony") {
+                const start = convertScreenshotToTapCoords(startX, startY, "harmony", 1, swipeScaleFactor);
+                const end = convertScreenshotToTapCoords(endX, endY, "harmony", 1, swipeScaleFactor);
+                const { harmonySwipe } = await import("../core/harmony.js");
+                // uiInput swipe speed is device-defined; no duration param. The
+                // scroll-surface probe and foreground-loss checks are adb-only and
+                // stay off here — verification still runs from the frames.
+                driverResult = await harmonySwipe(start.x, start.y, end.x, end.y, undefined, resolved.target.harmonyTargetKey);
             } else {
                 const start = convertScreenshotToTapCoords(startX, startY, "android", 1, swipeScaleFactor);
                 const end = convertScreenshotToTapCoords(endX, endY, "android", 1, swipeScaleFactor);
@@ -544,6 +553,7 @@ export function registerInteractionTools(server: McpServer): void {
                     beforeBuffer,
                     udid: resolvedUdid,
                     deviceId: resolved.target.androidSerial,
+                    hdcKey: resolved.target.harmonyTargetKey,
                     beforeScaleFactor,
                     source: "swipe-burst",
                 })
@@ -554,6 +564,7 @@ export function registerInteractionTools(server: McpServer): void {
                     beforeBuffer,
                     udid: resolvedUdid,
                     deviceId: resolved.target.androidSerial,
+                    hdcKey: resolved.target.harmonyTargetKey,
                     beforeScaleFactor,
                     source: "swipe-verify",
                 });
@@ -1089,7 +1100,11 @@ export function registerInteractionTools(server: McpServer): void {
                         platform === "ios"
                             ? await iosInputText(t, iosUdid)
                             : platform === "harmony"
-                            ? { success: false, error: "native HID typing is not supported on harmony yet" }
+                            ? await (async () => {
+                                  const { harmonyInputFocusedText } = await import("../core/harmony.js");
+                                  const r = await harmonyInputFocusedText(t, harmonyTargetKey);
+                                  return { success: r.success, error: r.error };
+                              })()
                             : await androidInputText(t, androidSerial),
                     raise: () => raiseKeyboard(platform, platform === "ios" ? iosUdid : androidSerial),
                     readNativeFields: () =>
@@ -1151,9 +1166,13 @@ async function nativeTextEntry(
     device: string | undefined
 ): Promise<{ success: boolean; message: string }> {
     if (platform === "harmony") {
-        // Native HID typing on harmony (uitest uiInput inputText) is not wired
-        // yet; refuse rather than route the text to an adb device.
-        return { success: false, message: "native text entry is not supported on harmony yet" };
+        // No accessibility field read on harmony yet, so the typed value cannot
+        // be verified — type into the focused field and say exactly that.
+        const { harmonyInputFocusedText } = await import("../core/harmony.js");
+        const r = await harmonyInputFocusedText(text, undefined);
+        return r.success
+            ? { success: true, message: "Typed text into the focused field (harmony — typed value not verified: no native field read yet)" }
+            : { success: false, message: r.error ?? "harmony native typing failed" };
     }
     const resolvedUdid =
         platform === "ios" ? (iosUdid ?? (await getActiveOrBootedSimulatorUdid()) ?? undefined) : undefined;
