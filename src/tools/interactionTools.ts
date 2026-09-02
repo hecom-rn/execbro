@@ -46,9 +46,10 @@ import { nonLatinKeyboardsFor } from "../core/iosKeyboardLayout.js";
 import { primaryInteractionBanner, platformFallbackBanner, platformUniqueBanner } from "../core/toolHelpers.js";
 import { resolveDeviceTarget, formatResolverError } from "../core/deviceResolver.js";
 import { PINCH_IN_DEFAULT_SPAN } from "../core/pinchThresholds.js";
-import { resolveAndroidDeviceId, resolveIosUdid, ANDROID_ARG_DESC, IOS_ARG_DESC } from "./_deviceArg.js";
+import { resolveAndroidDeviceId, resolveIosUdid, resolveHarmonyTargetKey, ANDROID_ARG_DESC, IOS_ARG_DESC } from "./_deviceArg.js";
 import type { ConnectedApp } from "../core/types.js";
 import type { DevicePlatform } from "../core/types.js";
+import { harmonyKeyEvent, HARMONY_KEY_EVENTS } from "../core/harmony.js";
 
 /**
  * Default swipe gesture duration. Android has always used 300ms; iOS passed no
@@ -934,6 +935,38 @@ export function registerInteractionTools(server: McpServer): void {
     );
     
     
+    // Tool: HarmonyOS key event
+    registerToolWithTelemetry(
+        server,
+        "harmony_key_event",
+        {
+            description: "Send a key event to a HarmonyOS device/emulator over hdc." +
+                platformUniqueBanner("sending HarmonyOS key events (BACK, HOME, etc.)") +
+                ` Common keys: ${Object.keys(HARMONY_KEY_EVENTS).join(", ")}` +
+                "\nPURPOSE: Dispatch HarmonyOS system keys (Back, Home, Enter, Del, Esc, Power, VolumeUp, VolumeDown) that aren't reachable via on-screen tap." +
+                "\nWHEN TO USE: Navigate back from a screen, dismiss a dialog, or press hardware-style keys during a flow on a HarmonyOS target.",
+            inputSchema: {
+                key: z.string().describe(`Key name (${Object.keys(HARMONY_KEY_EVENTS).join(", ")})`),
+                device: z.string().optional().describe("HarmonyOS target: hdc target key or RN device substring. Omit for the only/first connected target.")
+            }
+        },
+        async ({ key, device }) => {
+            const r = await resolveHarmonyTargetKey(device);
+            if (!r.ok) return r.response;
+            const result = await harmonyKeyEvent(key, r.targetKey ?? undefined);
+
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: result.success ? result.result! : `Error: ${result.error}`
+                    }
+                ],
+                isError: !result.success
+            };
+        }
+    );
+
     // ============================================================================
     // Android Accessibility Tools (UI Hierarchy)
     // ============================================================================

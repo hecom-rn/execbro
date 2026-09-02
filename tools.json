@@ -1,6 +1,6 @@
 {
     "generatedFrom": "toolRegistry",
-    "count": 60,
+    "count": 65,
     "tools": [
         "activate_license",
         "android_key_event",
@@ -33,6 +33,11 @@
         "get_screen_layout",
         "get_screen_state",
         "get_usage_guide",
+        "harmony_key_event",
+        "harmony_launch_app",
+        "harmony_list_packages",
+        "harmony_screenshot",
+        "harmony_terminate_app",
         "input_text",
         "inspect_at_point",
         "inspect_component",
@@ -233,6 +238,27 @@
         ],
         "get_usage_guide": [
             "topic"
+        ],
+        "harmony_key_event": [
+            "device",
+            "key"
+        ],
+        "harmony_launch_app": [
+            "abilityName",
+            "bundleName",
+            "device"
+        ],
+        "harmony_list_packages": [
+            "device",
+            "filter"
+        ],
+        "harmony_screenshot": [
+            "device",
+            "outputPath"
+        ],
+        "harmony_terminate_app": [
+            "bundleName",
+            "device"
         ],
         "input_text": [
             "component",

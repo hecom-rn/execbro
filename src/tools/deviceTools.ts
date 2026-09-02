@@ -15,6 +15,8 @@ import { platformUniqueBanner } from "../core/toolHelpers.js";
 import { listAllDevices } from "../core/deviceDiscovery.js";
 import { getConnectedApps } from "../core/connection.js";
 import { resolveAndroidDeviceId, resolveIosUdid, ANDROID_ARG_DESC, IOS_ARG_DESC } from "./_deviceArg.js";
+import { harmonyLaunchApp, harmonyListPackages, harmonyTerminateApp } from "../core/harmony.js";
+import { resolveHarmonyTargetKey } from "./_deviceArg.js";
 
 export function registerDeviceTools(server: McpServer): void {
     // ============================================================================
@@ -220,6 +222,97 @@ export function registerDeviceTools(server: McpServer): void {
             };
         }
     );
+    // Tool: HarmonyOS launch app
+    registerToolWithTelemetry(
+        server,
+        "harmony_launch_app",
+        {
+            description: "Launch an app on a HarmonyOS device/emulator by bundle name over hdc" +
+                platformUniqueBanner("launching a HarmonyOS app by bundle name") +
+                "\nPURPOSE: Start an installed HarmonyOS app (aa start) so the next tool calls hit a running process." +
+                "\nWHEN TO USE: Before interaction when the app isn't foregrounded. Bundle names come from harmony_list_packages.",
+            inputSchema: {
+                bundleName: z.string().describe("Bundle name of the app (e.g., com.example.myapp)"),
+                abilityName: z.string().optional().describe("Optional UIAbility name. Defaults to EntryAbility."),
+                device: z.string().optional().describe("HarmonyOS target: hdc target key or RN device substring. Omit for the only/first connected target.")
+            }
+        },
+        async ({ bundleName, abilityName, device }) => {
+            const r = await resolveHarmonyTargetKey(device);
+            if (!r.ok) return r.response;
+            const result = await harmonyLaunchApp(bundleName, abilityName, r.targetKey ?? undefined);
+
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: result.success ? result.result! : `Error: ${result.error}`
+                    }
+                ],
+                isError: !result.success
+            };
+        }
+    );
+
+    // Tool: HarmonyOS list packages
+    registerToolWithTelemetry(
+        server,
+        "harmony_list_packages",
+        {
+            description: "List installed apps (bundle names) on a HarmonyOS device/emulator over hdc" +
+                platformUniqueBanner("listing installed HarmonyOS bundles") +
+                "\nPURPOSE: Enumerate bundle names via `bm dump -a` so you can confirm installation or pick a target for harmony_launch_app." +
+                "\nWHEN TO USE: Before harmony_launch_app when you don't know the exact bundle name.",
+            inputSchema: {
+                device: z.string().optional().describe("HarmonyOS target: hdc target key or RN device substring. Omit for the only/first connected target."),
+                filter: z.string().optional().describe("Optional filter to search bundle names (case-insensitive)")
+            }
+        },
+        async ({ device, filter }) => {
+            const r = await resolveHarmonyTargetKey(device);
+            if (!r.ok) return r.response;
+            const result = await harmonyListPackages(r.targetKey ?? undefined);
+            if (!result.success) {
+                return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+            }
+            const packages = (result.packages ?? []).filter(
+                (p) => !filter || p.toLowerCase().includes(filter.toLowerCase())
+            );
+            return { content: [{ type: "text", text: packages.join("\n") }] };
+        }
+    );
+
+    // Tool: HarmonyOS terminate app
+    registerToolWithTelemetry(
+        server,
+        "harmony_terminate_app",
+        {
+            description: "Force-stop an app on a HarmonyOS device/emulator by bundle name over hdc" +
+                platformUniqueBanner("force-stopping a HarmonyOS app") +
+                "\nPURPOSE: Kill an app process (aa force-stop) to test cold-start paths or clean up state." +
+                "\nWHEN TO USE: Before relaunching to reset app state, or when the app is wedged.",
+            inputSchema: {
+                bundleName: z.string().describe("Bundle name of the app (e.g., com.example.myapp)"),
+                device: z.string().optional().describe("HarmonyOS target: hdc target key or RN device substring. Omit for the only/first connected target.")
+            }
+        },
+        async ({ bundleName, device }) => {
+            const r = await resolveHarmonyTargetKey(device);
+            if (!r.ok) return r.response;
+            const result = await harmonyTerminateApp(bundleName, r.targetKey ?? undefined);
+
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: result.success ? result.result! : `Error: ${result.error}`
+                    }
+                ],
+                isError: !result.success
+            };
+        }
+    );
+
     // Tool: iOS launch app
     registerToolWithTelemetry(
         server,
