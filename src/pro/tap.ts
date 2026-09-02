@@ -2744,6 +2744,38 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                     const tapY = (safeAreaTop > 0 && coords.y < safeAreaTop) ? coords.y + safeAreaTop : coords.y;
                     await iosTap(coords.x, tapY, { udid: targetUdid, duration: options.duration });
                     coords.y = tapY;
+                } else if (platform === "harmony") {
+                    // RNOH fiber frames are dp, and no density API is reachable
+                    // (PlatformConstants is empty, hidumper exposes no DPI) — so
+                    // converting dp ourselves would be a guess that taps the
+                    // wrong screen. Resolve the element's device-pixel bounds
+                    // from the uitest dumpLayout tree instead: RN testIDs appear
+                    // there as `key` with pixel bounds. Verified on device
+                    // 2026-09-02 (before this, harmony fell into the android
+                    // branch and drove the attached adb device).
+                    const { harmonyDumpLayout, findLayoutNode, harmonyTap, harmonyLongPress } =
+                        await import("../core/harmony.js");
+                    const dump = await harmonyDumpLayout(targetHdcKey);
+                    const node = dump.success && dump.root
+                        ? findLayoutNode(dump.root, { testID: query.testID, text: result.text })
+                        : null;
+                    if (!node || node.bounds[2] <= 0 || node.bounds[3] <= 0) {
+                        throw new Error(
+                            "could not resolve the element's device-pixel position on harmony " +
+                            "(no uitest dumpLayout match for this element)"
+                        );
+                    }
+                    const pxX = node.bounds[0] + Math.round(node.bounds[2] / 2);
+                    const pxY = node.bounds[1] + Math.round(node.bounds[3] / 2);
+                    const fiberTap = options.duration
+                        ? await harmonyLongPress(pxX, pxY, options.duration, targetHdcKey)
+                        : await harmonyTap(pxX, pxY, targetHdcKey);
+                    if (!fiberTap.success) {
+                        throw new Error(fiberTap.error || "hdc tap failed");
+                    }
+                    coords.x = pxX;
+                    coords.y = pxY;
+                    coords.unit = "pixels";
                 } else {
                     // Fabric returns dp — androidTap expects pixels
                     // Convert dp to pixels using device density

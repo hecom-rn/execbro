@@ -142,14 +142,27 @@ export function scheduleAppDetection(app: ConnectedApp): void {
                         // over the connect-time default (which is "android" for
                         // every app until a sim/adb link upgrades it).
                         app.platform = parsed.appPlatform;
-                        if (parsed.appPlatform === "harmony" && !app.harmonyTargetKey) {
-                            // Link the hdc target only when exactly one is attached —
-                            // with several, correlation is a guess, and a wrong key
-                            // points native tools at the wrong device.
+                        if (!app.adbSerial && !app.simulatorUdid) {
+                            // Link/correlate an hdc target only when exactly one
+                            // qualifies — with several, correlation is a guess,
+                            // and a wrong key points native tools at the wrong
+                            // device.
                             void import("./harmony.js")
                                 .then(async (h) => {
-                                    const targets = await h.listHarmonyTargets();
-                                    if (targets.length === 1) app.harmonyTargetKey = targets[0].key;
+                                    if (parsed.appPlatform === "harmony") {
+                                        const targets = await h.listHarmonyTargets();
+                                        if (targets.length === 1) app.harmonyTargetKey = targets[0].key;
+                                        return;
+                                    }
+                                    // PlatformConstants unreachable from JS (RNOH
+                                    // 0.77: empty proxy object, require undefined) —
+                                    // fall back to the RNOH hilog marker.
+                                    const rnohKey = await h.detectRnohTarget();
+                                    if (rnohKey) {
+                                        app.platform = "harmony";
+                                        app.harmonyTargetKey = rnohKey;
+                                        console.error(`[execbro] HarmonyOS detected via RNOH hilog marker: ${rnohKey}`);
+                                    }
                                 })
                                 .catch(() => {});
                         }

@@ -182,6 +182,92 @@ export function parseScreenSize(stdout: string): { width: number; height: number
     return null;
 }
 
+// --- Accessibility tree (uitest dumpLayout) ---
+
+export interface HarmonyLayoutNode {
+    /** RN testID when the node came from React (`key` in the dump). */
+    key: string;
+    text: string;
+    type: string;
+    /** Device-pixel [x, y, width, height]. */
+    bounds: [number, number, number, number];
+    clickable: boolean;
+    bundleName?: string;
+    children: HarmonyLayoutNode[];
+}
+
+function parseLayoutNode(raw: any): HarmonyLayoutNode | null {
+    if (!raw || typeof raw !== "object") return null;
+    const b = String(raw.attributes?.bounds ?? "");
+    const m = b.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
+    const bounds: [number, number, number, number] = m
+        ? [Number(m[1]), Number(m[2]), Number(m[3]) - Number(m[1]), Number(m[4]) - Number(m[2])]
+        : [0, 0, 0, 0];
+    return {
+        key: String(raw.attributes?.key ?? ""),
+        text: String(raw.attributes?.text ?? ""),
+        type: String(raw.attributes?.type ?? ""),
+        bounds,
+        clickable: String(raw.attributes?.clickable ?? "") === "true",
+        bundleName: raw.attributes?.bundleName ? String(raw.attributes.bundleName) : undefined,
+        children: Array.isArray(raw.children)
+            ? raw.children.map(parseLayoutNode).filter(Boolean)
+            : [],
+    };
+}
+
+/** Parse a `uitest dumpLayout -p <file>` document (JSON, device-pixel bounds). */
+export function parseDumpLayout(jsonText: string): HarmonyLayoutNode | null {
+    try {
+        return parseLayoutNode(JSON.parse(jsonText));
+    } catch {
+        return null;
+    }
+}
+
+/** Depth-first search for a node matching a testID or an exact text. */
+export function findLayoutNode(
+    root: HarmonyLayoutNode,
+    opts: { testID?: string; text?: string }
+): HarmonyLayoutNode | null {
+    const wantKey = opts.testID ? String(opts.testID) : "";
+    const wantText = opts.text ? String(opts.text).trim() : "";
+    const stack = [root];
+    while (stack.length) {
+        const n = stack.pop() as HarmonyLayoutNode;
+        if (wantKey && n.key === wantKey) return n;
+        if (!wantKey && wantText && n.text.trim() && n.text.trim().includes(wantText)) return n;
+        stack.push(...n.children);
+    }
+    return null;
+}
+
+export async function harmonyDumpLayout(
+    targetKey?: string
+): Promise<{ success: boolean; root?: HarmonyLayoutNode; error?: string }> {
+    const missing = await requireHdc();
+    if (missing) return missing;
+    const device = targetKey ?? (await getDefaultHarmonyTarget());
+    if (!device) return { success: false, error: "No HarmonyOS device connected." };
+    const { mkdtemp, readFile, unlink } = await import("fs/promises");
+    const remote = `/data/local/tmp/execbro_layout_${process.pid}.json`;
+    const localDir = await mkdtemp(path.join(tmpdir(), "execbro-harmony-"));
+    try {
+        await runHdc(buildShellArgs(device, ["uitest", "dumpLayout", "-p", remote]), 20_000);
+        const local = path.join(localDir, "layout.json");
+        await runHdc([...buildHdcArgs(device), "file", "recv", remote, local]);
+        const root = parseDumpLayout((await readFile(local)).toString("utf8"));
+        if (!root) return { success: false, error: "uitest dumpLayout produced no parseable tree" };
+        return { success: true, root };
+    } catch (e) {
+        return errFrom(e, "dumpLayout");
+    } finally {
+        await runHdc(buildShellArgs(device, ["rm", "-f", remote]), 10_000).catch(() => undefined);
+        await unlink(path.join(localDir, "layout.json")).catch(() => undefined);
+        await unlink(localDir).catch(() => undefined);
+    }
+}
+
 // --- Execution layer ---
 
 async function runHdc(args: string[], timeoutMs = HDC_TIMEOUT): Promise<{ stdout: string; stderr: string }> {
@@ -191,6 +277,31 @@ async function runHdc(args: string[], timeoutMs = HDC_TIMEOUT): Promise<{ stdout
 function errFrom(e: unknown, context: string): HdcResult {
     const message = e instanceof Error ? e.message : String(e);
     return { success: false, error: `hdc ${context} failed: ${message}` };
+}
+
+/**
+ * Find the hdc target that is actually running an RNOH app, by scanning each
+ * connected target's hilog for the RNOH runtime marker. This is the fallback
+ * platform signal when `PlatformConstants` is unreachable from JS (verified on
+ * RNOH 0.77.1: `nativeModuleProxy.PlatformConstants` is an empty object and
+ * `require('react-native')` is undefined through CDP). Returns the single
+ * RNOH-bearing target, or null when none or several qualify.
+ */
+export async function detectRnohTarget(): Promise<string | null> {
+    const targets = (await listHarmonyTargets()).filter((t) => t.state === "connected");
+    const withMarker: string[] = [];
+    for (const t of targets) {
+        try {
+            const { stdout } = await runHdc(
+                buildShellArgs(t.key, ["hilog -x | grep -m1 -iE 'rnoh|reactnative'"]),
+                15_000
+            );
+            if (stdout.trim()) withMarker.push(t.key);
+        } catch {
+            // unreachable target — skip
+        }
+    }
+    return withMarker.length === 1 ? withMarker[0] : null;
 }
 
 /** First connected target, or null. Same role as getDefaultAndroidDevice. */
