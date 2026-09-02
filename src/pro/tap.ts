@@ -2851,13 +2851,25 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                     coords.y = pxY;
                     coords.unit = "pixels";
                 } else {
-                    // Fabric returns dp — androidTap expects pixels
-                    // Convert dp to pixels using device density
-                    const { androidGetDensity } = await import("../core/android.js");
+                    // Fabric returns dp — androidTap expects pixels.
+                    // measureInWindow is window-relative on Android and the RN
+                    // content starts BELOW the status bar, while `adb input tap`
+                    // speaks screen pixels — the same +topInset normalization
+                    // every layout tool applies via screenSpace.ts. Verified on
+                    // emulator (2026-09-02): without it a header button whose
+                    // screen position was y=231px was tapped at y=72px, inside
+                    // the status bar, and the tap silently did nothing.
+                    const { androidGetDensity, androidGetStatusBarHeight } = await import(
+                        "../core/android.js"
+                    );
                     const densityResult = await androidGetDensity(targetSerial);
                     const densityScale = (densityResult.density || 420) / 160;
+                    const statusBar = await androidGetStatusBarHeight(targetSerial).catch(
+                        () => null
+                    );
+                    const yDp = coords.y + (statusBar?.success && statusBar.heightDp ? statusBar.heightDp : 24);
                     const pxX = Math.round(coords.x * densityScale);
-                    const pxY = Math.round(coords.y * densityScale);
+                    const pxY = Math.round(yDp * densityScale);
                     const fiberTap = await androidTap(pxX, pxY, targetSerial, options.duration);
                     if (!fiberTap.success) {
                         throw new Error(fiberTap.error || "adb tap failed");

@@ -47,6 +47,11 @@ jest.unstable_mockModule("../../core/exec.js", () => ({
             return { stdout: UI_XML, stderr: "" };
         }
         if (args?.includes("wm density")) return { stdout: "Physical density: 160", stderr: "" };
+        if (args?.some((a) => a.startsWith("dumpsys"))) {
+            // statusBars frame bottom = 63px -> 63dp at density 160. The fiber
+            // path must add this inset before tapping (see tap.ts android branch).
+            return { stdout: "statusBars frame=[0,0][1080,63] visible=true", stderr: "" };
+        }
         return { stdout: "", stderr: "" };
     },
     execAsync: async () => ({ stdout: "", stderr: "" }),
@@ -174,9 +179,11 @@ describe("tap duration — Android", () => {
         // strategy is pinned: for a testID query `auto` tries accessibility first
         // (resource-id is a cheaper lookup than a fiber walk), so without this the
         // test would assert the fiber path while exercising the accessibility one.
+        // Fiber measures window-relative dp; the status bar inset (63dp from the
+        // dumpsys mock) is added before the dp->px scaling: 200 + 63 = 263.
         await tap({ testID: "submit-btn", device: TARGET, strategy: "fiber", duration: HOLD_MS, screenshot: false, verify: false });
 
-        expect(inputCommands()).toEqual([`input swipe 100 200 100 200 ${HOLD_MS}`]);
+        expect(inputCommands()).toEqual([`input swipe 100 263 100 263 ${HOLD_MS}`]);
     });
 
     it("holds on the accessibility path", async () => {
@@ -197,7 +204,7 @@ describe("tap duration — Android", () => {
         connectAndroidApp();
         await tap({ testID: "submit-btn", device: TARGET, strategy: "fiber", screenshot: false, verify: false });
 
-        expect(inputCommands()).toEqual(["input tap 100 200"]);
+        expect(inputCommands()).toEqual(["input tap 100 263"]);
     });
 });
 
