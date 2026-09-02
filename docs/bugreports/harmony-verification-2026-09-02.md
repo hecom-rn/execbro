@@ -67,9 +67,17 @@ blob，pidof 解析不出 pid，归属管线全部丢弃。回修：`resolveHarm
 - `android_screenshot()`（无参，文档化默认行为）→ 照常工作（1344×2992）✅
 - 全程 Android CRM app 无误触/弹窗/退出 ✅
 
-## 待办（P3）
+## 补充轮（2026-09-02 下午）：未适配项补齐 — 通过（2 处真机回修）
 
-1. `parseScreenSize` 正则放宽 `activeMode: ` 冒号后空格（当前靠快照回推兜底）。
-2. debug 构建 source 符号化复测（需应用侧配合）。
-3. input_text native 路径（`uiInput text`）真机补测（需含输入框的页面）。
-4. dismiss_keyboard 验证语义在鸿蒙上的实际表现复测。
+| 项 | 结果 |
+|---|---|
+| tap accessibility 策略 | ✅ 接入 dumpLayout 树（testID 为 key、设备像素 bounds、包含关系收敛 + 歧义守卫）；真机 `tap({testID:"tabbarMenu"})` method=accessibility 真实切页 |
+| input_text native 路径 | ✅ 真机验证：中文+数字写入搜索框（含 IME 提交延迟轮询）；发现 `uiInput text` 为**追加**语义（改尾部匹配）；发现容器节点带窗口级 focused 标记与内部 key（字段启发式收紧为仅输入类型节点）；最终 "Typed and verified …: doneZZ9" |
+| get_bundle_errors 兜底 | ✅ harmony 分派已接（与 ocr_screenshot 同构）。注意：兜底门控 `metroRunning && !hasConnectedApps` 在 Metro 仍广播僵尸 target 时不可达（三平台共有的既有行为），本轮未触发到该分支 |
+| parseScreenSize 空格 | ✅ 正则放宽 `activeMode: WxH` |
+
+## 剩余待办（P3）
+
+1. debug 构建 source 符号化复测（需应用侧配合出 debug 包）。
+2. dismiss_keyboard 验证语义在鸿蒙上的实际表现复测。
+3. Phase 4 调研项维持不变：pinch（uitest 多指）、hdc install、deep link（aa start 带 URI）、模拟器管理。
