@@ -14,8 +14,8 @@
  * has no -S, and a shebang that fails to parse means the CLI cannot start at
  * all. This costs one extra module load and works everywhere.
  *
- * Payoff: posthog-node reports stack frames verbatim from Node, so error
- * tracking gets src/**\/*.ts file+line instead of compiled build/*.js offsets.
+ * Payoff: stack traces reported by the server (crash logs, unhandled
+ * rejections) carry src/**\/*.ts file+line instead of compiled build/*.js offsets.
  */
 process.setSourceMapsEnabled(true);
 

@@ -1,39 +1,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { existsSync, unlinkSync } from "fs";
 
 import { registerToolWithTelemetry, toolRegistry } from "../core/register.js";
 import { getGuideOverview, getGuideByTopic, getAvailableTopics } from "../core/guides.js";
-import { getLicenseStatus, getUsageInfo, getDashboardUrl, requestLinkToken, refreshLicense } from "../core/license.js";
-import { refreezeSessionVerdict } from "../pro/usageGate.js";
-import { getServerVersion, TELEMETRY_JSONL_PATH } from "../core/telemetry.js";
+import { getServerVersion } from "../core/telemetry.js";
 import { getTargetPlatform } from "../core/state.js";
 import { formatIssueBody, buildGitHubUrl } from "../core/feedback.js";
 
 export interface MetaToolOptions {
-    devMode: boolean;
     httpMode: boolean;
-}
-
-/**
- * Render a plan expiry for display, or null when there is nothing sane to show.
- *
- * Two failure modes this exists to prevent, both of which shipped:
- * - `new Date(null)` is the epoch, NOT NaN, so a null expiry rendered as
- *   "Plan expires: 1/1/1970".
- * - The old fallback was `String(expiresAt)`, so a non-string (a Firestore
- *   Timestamp serialized as {_seconds,_nanoseconds} by an older backend)
- *   rendered as "Plan expires: [object Object]".
- *
- * The server-side root cause is fixed in web (validate now sends an ISO string
- * or null), but published clients in the field outlive any single deploy, so
- * this stays defensive: omit the line rather than print a wrong date.
- */
-export function formatPlanExpiry(expiresAt: unknown): string | null {
-    if (typeof expiresAt !== "string" || expiresAt === "") return null;
-    const exp = new Date(expiresAt);
-    return Number.isNaN(exp.getTime()) ? null : exp.toLocaleDateString();
 }
 
 export function registerMetaTools(server: McpServer, opts: MetaToolOptions): void {
@@ -80,70 +56,6 @@ export function registerMetaTools(server: McpServer, opts: MetaToolOptions): voi
         }
     );
 
-    // Tool: License status
-    registerToolWithTelemetry(
-        server,
-        "get_license_status",
-        {
-            description:
-                "Get your installation ID, license tier, and this month's usage against the free cap. Shows the Installation ID (needed to link Pro in the dashboard), current tier, cache validity, and calls used / remaining this month.",
-            inputSchema: {},
-        },
-        async () => {
-            // Re-validate against the server so a mid-session upgrade (e.g. bought
-            // on the dashboard) is reflected here, then lift/re-apply the frozen
-            // session block accordingly — no MCP restart needed to clear a stale block.
-            await refreshLicense();
-            refreezeSessionVerdict(getUsageInfo());
-
-            const status = getLicenseStatus();
-            const lines: string[] = [];
-
-            lines.push(`Installation ID: ${status.installationId}`);
-            lines.push(`License: ${status.tier.charAt(0).toUpperCase() + status.tier.slice(1)}`);
-
-            if (status.plan) {
-                const expStr = formatPlanExpiry(status.plan.expiresAt);
-                if (expStr) lines.push(`Plan expires: ${expStr}`);
-            }
-
-            lines.push(`Cache valid until: ${status.cacheExpiresAt}`);
-
-            const usage = getUsageInfo();
-            if (usage && usage.limit != null) {
-                lines.push("");
-                lines.push("--- Usage ---");
-                lines.push(`Monthly usage: ${usage.used} / ${usage.limit}`);
-                lines.push(`Month: ${usage.monthKey}`);
-                if (usage.resetsAt) lines.push(`Resets: ${new Date(usage.resetsAt).toLocaleDateString()}`);
-                if (usage.capActive === false && usage.enforcementStartsAt) {
-                    lines.push(
-                        `Status: Grace period — cap applies ${new Date(usage.enforcementStartsAt).toLocaleDateString()}`
-                    );
-                } else {
-                    lines.push(
-                        `Status: ${usage.canUse ? "Active" : "Limit reached — upgrade at " + getDashboardUrl() + "/upgrade"}`
-                    );
-                }
-            }
-
-            if (status.tier === "free") {
-                const dashboardUrl = getDashboardUrl();
-                if (dashboardUrl) {
-                    const linkToken = await requestLinkToken();
-                    if (linkToken) {
-                        lines.push("");
-                        lines.push(`Link your account: ${dashboardUrl}/link?token=${linkToken}`);
-                    }
-                }
-            }
-
-            return {
-                content: [{ type: "text" as const, text: lines.join("\n") }],
-            };
-        }
-    );
-
     // Tool: Send feedback / bug report / feature request
     registerToolWithTelemetry(
         server,
@@ -166,13 +78,11 @@ export function registerMetaTools(server: McpServer, opts: MetaToolOptions): voi
             const serverVersion = getServerVersion();
             const platform = process.platform;
             const deviceType = getTargetPlatform();
-            const licenseStatus = getLicenseStatus();
 
             const env = {
                 serverVersion,
                 platform,
-                deviceType,
-                licenseTier: licenseStatus.tier
+                deviceType
             };
 
             const input = { type, title, description, workflowContext: workflow_context };
@@ -201,30 +111,6 @@ export function registerMetaTools(server: McpServer, opts: MetaToolOptions): voi
             };
         }
     );
-
-    // Dev-only tool: reset local telemetry data
-    if (opts.devMode) {
-        registerToolWithTelemetry(
-            server,
-            "reset_telemetry",
-            {
-                description:
-                    "Clear local telemetry data file (/tmp/rn-devtools-telemetry.jsonl). Only available in development mode.",
-                inputSchema: {},
-            },
-            async () => {
-                if (existsSync(TELEMETRY_JSONL_PATH)) {
-                    unlinkSync(TELEMETRY_JSONL_PATH);
-                    return {
-                        content: [{ type: "text" as const, text: "Local telemetry data cleared." }],
-                    };
-                }
-                return {
-                    content: [{ type: "text" as const, text: "No local telemetry data file found." }],
-                };
-            }
-        );
-    }
 
     // HTTP-only meta-tool: dev (proxies any tool from the latest in-process registry)
     if (opts.httpMode) {

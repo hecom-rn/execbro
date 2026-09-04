@@ -7,7 +7,6 @@ import { isPublishedBuild } from "../../core/buildInfo.js";
 // suite is pure ESM (ts-jest default-esm preset) where __dirname is undefined,
 // so resolve the source files from process.cwd() instead.
 const BUILD_INFO_SRC = join(process.cwd(), "src", "core", "buildInfo.ts");
-const TELEMETRY_SRC = join(process.cwd(), "src", "core", "telemetry.ts");
 
 // Split so this file does not itself contain the literal the injector hunts for.
 const PLACEHOLDER = "__BUILD" + "_TOKEN__";
@@ -31,21 +30,9 @@ describe("BUILD_TOKEN placeholder", () => {
     });
 });
 
-describe("telemetry payload wiring", () => {
-    it("dispatch() includes buildToken built from the BUILD_TOKEN constant", () => {
-        const src = readFileSync(TELEMETRY_SRC, "utf-8");
-        expect(src.includes("buildToken: BUILD_TOKEN")).toBe(true);
-    });
-
-    it("imports the token rather than redeclaring the placeholder", () => {
-        const src = readFileSync(TELEMETRY_SRC, "utf-8");
-        expect(src.includes('from "./buildInfo.js"')).toBe(true);
-        expect(src.includes(PLACEHOLDER)).toBe(false);
-    });
-});
-
 describe("isPublishedBuild", () => {
     it("reports a source checkout as unpublished", () => {
         expect(isPublishedBuild()).toBe(false);
     });
 });
+

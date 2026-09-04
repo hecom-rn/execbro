@@ -6,7 +6,6 @@ import { getFirstConnectedApp, getConnectedAppByDevice, getConnectedAppBySimulat
 import { fetchDevices, selectMainDevice, filterDebuggableDevices, scanMetroPorts } from "./metro.js";
 import type { DeviceInfo } from "./types.js";
 import { DEFAULT_RECONNECTION_CONFIG, cancelReconnectionTimer } from "./connectionState.js";
-import { trackAutoReconnect } from "./telemetry.js";
 import { probeCdpAlive } from "./probe.js";
 import { buildContextPreamble } from "./appContext.js";
 import { registerHandle, clearHandlesForDevice } from "./promiseHandles.js";
@@ -1055,8 +1054,6 @@ export async function executeInApp(
     options: ExecuteOptions = {},
     device?: string
 ): Promise<ExecutionResult> {
-    const toolName = options.originatingToolName ?? "unknown";
-
     // Clamp timeoutMs at the boundary. Mistyped values clamp with a warning surfaced in
     // _meta rather than reject. The default (when not supplied) keeps the historical 10000 ms.
     const requestedTimeout = options.timeoutMs ?? 10_000;
@@ -1087,7 +1084,6 @@ export async function executeInApp(
 
     if (first.success) {
         hasEverConnected = true;
-        trackAutoReconnect("not_needed", toolName);
         return withClampMeta(first);
     }
 
@@ -1110,7 +1106,6 @@ export async function executeInApp(
     const classification = await classifyWithLivenessProbe(first.error ?? "", source, probeApp);
 
     if (classification.kind !== "transport") {
-        trackAutoReconnect("not_needed", toolName);
         return withClampMeta(first);
     }
 
@@ -1119,7 +1114,6 @@ export async function executeInApp(
     // so the user sees the actionable message ("Run 'scan_metro' first") instead
     // of a misleading 'reconnect_attempted' prefix.
     if (classification.pattern === "no_apps" && !hasEverConnected) {
-        trackAutoReconnect("not_needed", toolName);
         return withClampMeta(first);
     }
 
@@ -1133,7 +1127,6 @@ export async function executeInApp(
     // The option is only respected when explicitly false — absent still means
     // true, so every normal tool keeps today's reconnect behaviour.
     if (options.autoReconnect === false) {
-        trackAutoReconnect("not_needed", toolName);
         return withClampMeta(first);
     }
 
@@ -1142,7 +1135,6 @@ export async function executeInApp(
 
     const reconnected = await attemptQuickReconnect(preferredPort);
     if (!reconnected) {
-        trackAutoReconnect("scan_failed", toolName, classification.pattern);
         return withClampMeta({
             success: false,
             error: `reconnect_attempted: ${first.error ?? "unknown"}`,
@@ -1158,14 +1150,12 @@ export async function executeInApp(
     );
 
     if (retry.success) {
-        trackAutoReconnect("success", toolName, classification.pattern);
         return withClampMeta({
             ...retry,
             _meta: { reconnected: true, transportError: first.error ?? "unknown" },
         });
     }
 
-    trackAutoReconnect("retry_failed", toolName, classification.pattern);
     return withClampMeta({
         success: false,
         error: `reconnected_but_still_failed: ${first.error ?? "unknown"} | ${retry.error ?? "unknown"}`,
