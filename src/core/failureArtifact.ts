@@ -20,19 +20,7 @@ export function isArtifactCaptureEnabled(): boolean {
 
 export type ArtifactOutcome = "failure" | "unmeaningful";
 
-export interface OcrDetection {
-    text: string;
-    bbox: [number, number, number, number];
-    conf: number;
-}
-
 export interface ArtifactSenses {
-    ocr: {
-        ran: boolean;
-        durationMs: number;
-        detections: OcrDetection[];
-        closestMatch: { text: string; score: number } | null;
-    };
     fiber: {
         ran: boolean;
         durationMs: number;
@@ -151,7 +139,6 @@ export interface CaptureInput {
 
 export interface CaptureSignals {
     artifactKey: string;
-    ocrClosestMatch: string;
     fiberPressableCount: string;
     accessibilityMatchCount: string;
     appRoute: string;
@@ -166,9 +153,6 @@ export interface CaptureResult {
 export async function captureFailureArtifact(input: CaptureInput): Promise<CaptureResult> {
     const signals: CaptureSignals = {
         artifactKey: "",
-        ocrClosestMatch: input.senses.ocr.closestMatch
-            ? `${input.senses.ocr.closestMatch.text}@${input.senses.ocr.closestMatch.score.toFixed(2)}`
-            : "",
         fiberPressableCount: input.senses.fiber.ran ? String(input.senses.fiber.pressables.length) : "",
         accessibilityMatchCount: input.senses.accessibility.ran ? String(input.senses.accessibility.elements.length) : "",
         appRoute: input.deviceMeta.route || "",

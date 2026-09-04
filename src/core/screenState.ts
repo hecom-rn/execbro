@@ -336,7 +336,7 @@ export function formatScreenStateSummary(
         const comp = ss.nativeOverlay.component ? ` (${ss.nativeOverlay.component})` : "";
         lines.push(
             `⚠️ Native sheet detected${comp} — its content is presented outside the RN coordinate ` +
-            `space, so tap targets below may be wrong. Verify with ios_screenshot / ocr_screenshot.`
+            `space, so tap targets below may be wrong. Verify with ios_screenshot / android_screenshot.`
         );
     }
     if (ss.notes && ss.notes.length > 0) {
@@ -1589,7 +1589,7 @@ export async function getScreenState(
 
     // Native-presented sheets (e.g. True Sheet) render their content into a detached native
     // context whose measureInWindow data is unreliable. Collect open-sheet host markers so
-    // the resolve pass can flag a nativeOverlay and steer the agent to screenshot/OCR.
+    // the resolve pass can flag a nativeOverlay and steer the agent to screenshot.
     var __nativeSheetMarkers = [];
     var __NATIVE_SHEET_RE = /^(${NATIVE_SHEET_MARKER_RE_SRC})$/;
     (function scanNative(fiber, depth) {
@@ -2324,7 +2324,7 @@ export async function getScreenState(
 
     // Native-presented sheet detection: when an open native sheet covers the screen, its
     // (and the underlying screen's) coordinates are unreliable — flag it and mark the
-    // underlying pressables blocked so agents fall back to screenshot/OCR.
+    // underlying pressables blocked so agents fall back to screenshots.
     try {
         const parsedRaw = JSON.parse(resolveResult.result || "{}");
         const markers: string[] = Array.isArray(parsedRaw.nativeMarkers) ? parsedRaw.nativeMarkers : [];
@@ -2333,7 +2333,7 @@ export async function getScreenState(
             const note =
                 `Native ${sheet.kind} (${sheet.component}) is open — its content is presented outside ` +
                 `the RN coordinate space; reported coordinates for it (and the screen behind it) are ` +
-                `unreliable. Use ios_screenshot / ocr_screenshot to read and tap it.`;
+                `unreliable. Use ios_screenshot / android_screenshot to read and tap it.`;
             screenState.nativeOverlay = { kind: sheet.kind, component: sheet.component, note };
             screenState.notes = [...(screenState.notes ?? []), note];
             // The native sheet dims/blocks the underlying screen — flag root pressables.

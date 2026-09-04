@@ -591,7 +591,7 @@ export async function getScreenLayout(
 
     // Retry once on the early-startup race where the React DevTools hook
     // isn't registered yet. Production / non-__DEV__ builds will still fail
-    // after the retry — surface an actionable error pointing at OCR/screenshot.
+    // after the retry — surface an actionable error pointing at screenshot tools.
     if (dispatchError && /React DevTools hook not found/.test(dispatchError)) {
         await delay(400);
         dispatchResult = await executeInApp(dispatchExpression, false, { timeoutMs: timeoutMs ?? 30000, originatingToolName: "get_screen_layout" }, device);
@@ -608,8 +608,8 @@ export async function getScreenLayout(
                 success: false,
                 error:
                     "React DevTools hook not registered (likely a production / non-__DEV__ build). " +
-                    "Fiber-based layout is unavailable. Use ocr_screenshot for text + tap coordinates, " +
-                    "or ios_screenshot / android_screenshot for a visual snapshot.",
+                    "Fiber-based layout is unavailable. Use ios_screenshot / android_screenshot for a visual snapshot, " +
+                    "or tap(x, y) with coordinates read from it.",
             };
         }
     }

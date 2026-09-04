@@ -183,21 +183,6 @@ describe("tap threads the Android serial to the device", () => {
         expect(dumps.every(targetsTheResolvedDevice)).toBe(true);
     });
 
-    it("screenshots the resolved emulator for OCR", async () => {
-        connectAndroidApp();
-        await tap({
-            text: "Submit",
-            device: TARGET,
-            strategy: "ocr",
-            screenshot: false,
-            verify: false
-        });
-
-        const caps = adbCallsMatching("screencap");
-        expect(caps.length).toBeGreaterThan(0);
-        expect(caps.every(targetsTheResolvedDevice)).toBe(true);
-    });
-
     it("leaves adb on its default device when no device is named", async () => {
         // The resolver still answers with a serial here (it picks the only
         // device), so this guards the inverse: threading must not invent a

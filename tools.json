@@ -1,6 +1,6 @@
 {
     "generatedFrom": "toolRegistry",
-    "count": 65,
+    "count": 64,
     "tools": [
         "activate_license",
         "android_key_event",
@@ -56,7 +56,6 @@
         "network_condition",
         "network_mock",
         "network_replay",
-        "ocr_screenshot",
         "pinch",
         "redux_dispatch",
         "redux_get_state",
@@ -380,10 +379,6 @@
             "method",
             "requestId",
             "url"
-        ],
-        "ocr_screenshot": [
-            "deviceId",
-            "platform"
         ],
         "pinch": [
             "angle",

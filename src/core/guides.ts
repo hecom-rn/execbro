@@ -54,7 +54,7 @@ const guides: Guide[] = [
         content: `# Component Inspection
 
 ## Recommended Workflow: Identify a Component on Screen
-1. Take a screenshot (ios_screenshot / android_screenshot) or use ocr_screenshot
+1. Take a screenshot (ios_screenshot / android_screenshot)
 2. Identify the target element visually, estimate its coordinates
 3. Pass those coordinates straight through — every layout tool, tap() and the screenshots share one screen-space coordinate system, so no conversion is needed
 4. Pick the right tool (see decision below) and call it with (x, y)
@@ -98,7 +98,7 @@ looks wrong and isn't on the node itself, walk the ancestors it returns.
 ## Orient First
 - get_screen_state — start here after any tap or navigation. Screenshot-free: active route,
   open overlays, and every on-screen element with a tap-ready (x, y) and frame. Reads screen
-  content (prices, labels, which image loaded) without a screenshot+OCR round-trip.
+  content (prices, labels, which image loaded) without a screenshot round-trip.
   - pressablesOnly=true for just the tappable list.
   - Switches and checkboxes are listed with their current value as [switch:ON] / [switch:OFF].
     They carry no onPress, so tap them by testID or component — never by guessing an x from a
@@ -140,7 +140,6 @@ size in a note when it applies.
 - get_screen_state: route + overlays + every element, screenshot-free (start here)
 - ios_screenshot / android_screenshot: visual capture
 - tap: also returns a post-tap screenshot by default (no separate screenshot call needed after tapping)
-- ocr_screenshot: screenshot with text recognition and tap coordinates
 - inspect_at_point: frames per ancestor + props + source file:line (no overlay, fast)`
     },
     {
@@ -158,13 +157,13 @@ Without a UI driver installed, these tools will fail.
 ## Tapping Elements
 Use tap — it tries multiple strategies automatically and returns a post-tap screenshot:
 1. tap(testID="login-btn") — most reliable, works via fiber tree (both platforms) and accessibility (Android)
-2. tap(text="Login") — text match via fiber tree, then accessibility, then OCR
+2. tap(text="Login") — text match via fiber tree, then accessibility
 3. tap(component="IconName") — component name match with parent traversal (for icon-only buttons; use find_components to discover names first)
 4. tap(x=..., y=...) — coordinate-based tap from screenshot (last resort)
 5. tap(x=..., y=..., native=true) — taps directly via ADB/simctl without React Native connection (for system dialogs, non-RN apps)
 
 tap returns a screenshot after every action (screenshot=true by default) — no need to call ios_screenshot/android_screenshot after tapping.
-For coordinate/accessibility/OCR taps, it also verifies if the tap caused a visual change (verify=true by default). Set screenshot=false for fastest execution.
+For coordinate/accessibility taps, it also verifies if the tap caused a visual change (verify=true by default). Set screenshot=false for fastest execution.
 
 ## Long Press
 Pass duration (milliseconds) to hold the touch instead of releasing it: tap(testID="row-3", duration=800). Use it for context menus, drag starts and multi-select. React Native fires onLongPress at 500ms, so anything under 500 will not trigger it; 800 is a safe default. Works on both platforms and with every targeting strategy (testID, text, component, coordinates).
@@ -172,7 +171,7 @@ Pass duration (milliseconds) to hold the touch instead of releasing it: tap(test
 The response carries longPress.handlerFound:
 - true — the element really has an onLongPress handler (only the fiber strategy can see this)
 - false — the hold was delivered, but this element has no onLongPress, so React Native fired its onPress on release instead. The call still succeeds; the warning tells you the long-press action is not wired to this element
-- null — resolved by accessibility, OCR or coordinates, which cannot see handlers. Not "no handler", just not knowable from that strategy
+- null — resolved by accessibility or coordinates, which cannot see handlers. Not "no handler", just not knowable from that strategy
 
 Elements wired ONLY for long press (onLongPress with no onPress) are invisible to an ordinary tap by design — a short press on them does nothing. Passing duration is what makes them resolvable.
 
@@ -233,7 +232,7 @@ For buttons that contain only an icon (no text):
 - Use maxTraversalDepth to increase parent search depth (default: 15) for deeply wrapped components
 
 ## Non-ASCII Text (Cyrillic, CJK, Arabic)
-tap(text=...) skips fiber for non-ASCII (Hermes limitation) and uses accessibility/OCR instead. For best results, use testID or coordinates.
+tap(text=...) skips fiber for non-ASCII (Hermes limitation) and uses accessibility instead. For best results, use testID or coordinates.
 
 ## Other Interactions
 - swipe: cross-platform swipe/scroll. Easiest form: swipe({ direction: "up" }) scrolls to reveal more content (content-scroll semantics; "down"/"left"/"right" supported, bare swipe() defaults to "up"). Optional distance is in screenshot pixels (default 33% of the axis). For pixel-precise gestures pass all four startX/startY/endX/endY coordinates — they take precedence over direction. Use for FlatList/SectionList scrolling where off-screen items aren't mounted. Returns verification.meaningful — if false, warning names which no-op it was, by probing the scroll surface under the start point: already at top, already at end, content not scrollable, wrong axis, or no scroll view there at all. On a screen with no React Native connection it says it could not inspect the screen, rather than claiming the gesture missed — the gesture itself still went through, and swipe needs no RN connection to drive the device. Set burst:true to surface overscroll/bounce feedback even when the final state is unchanged. Set verify:false, screenshot:false for the fastest path. Pass delta on iOS to control touch step size.
@@ -439,7 +438,7 @@ React Native has Fast Refresh by default. Only reload_app when:
 - Made changes to native code or config files
 
 ## Red Screen Errors
-If no errors captured via CDP, use get_bundle_errors with platform="ios" or "android" — this triggers screenshot+OCR fallback to read errors from the device screen.
+If no errors captured via CDP, use get_bundle_errors with platform="ios" or "android" — this captures a screenshot of the device screen so you can read errors visually.
 
 ## Key Tools
 - get_bundle_status: Metro health check

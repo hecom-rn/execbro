@@ -15,9 +15,7 @@ import {
     formatTapFailure,
     buildVerificationExplanation,
     isTapTimeout,
-    findOcrMatch,
 } from "../../pro/tap.js";
-import type { OCRResult } from "../../core/ocr.js";
 
 describe("ConnectedApp type", () => {
     it("accepts platform and lastScreenshot fields", () => {
@@ -134,19 +132,19 @@ describe("hasProblematicUnicode", () => {
 
 describe("getAvailableStrategies", () => {
     it("returns accessibility-first for text query", () => {
-        expect(getAvailableStrategies({ text: "Submit" }, "auto")).toEqual(["accessibility", "fiber", "ocr"]);
+        expect(getAvailableStrategies({ text: "Submit" }, "auto")).toEqual(["accessibility", "fiber"]);
     });
     it("includes fiber for non-ASCII accented text", () => {
-        expect(getAvailableStrategies({ text: "Отправить" }, "auto")).toEqual(["accessibility", "fiber", "ocr"]);
+        expect(getAvailableStrategies({ text: "Отправить" }, "auto")).toEqual(["accessibility", "fiber"]);
     });
     it("includes fiber for Polish text", () => {
-        expect(getAvailableStrategies({ text: "Potwierdź" }, "auto")).toEqual(["accessibility", "fiber", "ocr"]);
+        expect(getAvailableStrategies({ text: "Potwierdź" }, "auto")).toEqual(["accessibility", "fiber"]);
     });
     it("includes fiber for Vietnamese text", () => {
-        expect(getAvailableStrategies({ text: "Tin nhắn" }, "auto")).toEqual(["accessibility", "fiber", "ocr"]);
+        expect(getAvailableStrategies({ text: "Tin nhắn" }, "auto")).toEqual(["accessibility", "fiber"]);
     });
     it("skips fiber for emoji text", () => {
-        expect(getAvailableStrategies({ text: "🔥 Fire" }, "auto")).toEqual(["accessibility", "ocr"]);
+        expect(getAvailableStrategies({ text: "🔥 Fire" }, "auto")).toEqual(["accessibility"]);
     });
     it("returns accessibility+fiber for testID", () => {
         expect(getAvailableStrategies({ testID: "btn" }, "auto")).toEqual(["accessibility", "fiber"]);
@@ -157,35 +155,30 @@ describe("getAvailableStrategies", () => {
     it("returns coordinate for x,y", () => {
         expect(getAvailableStrategies({ x: 100, y: 200 }, "auto")).toEqual(["coordinate"]);
     });
-    it("returns explicit strategy with OCR fallback for text query", () => {
-        expect(getAvailableStrategies({ text: "Submit" }, "fiber")).toEqual(["fiber", "ocr"]);
-        expect(getAvailableStrategies({ text: "Submit" }, "accessibility")).toEqual(["accessibility", "ocr"]);
-    });
-    it("returns only OCR when explicitly set with text query", () => {
-        expect(getAvailableStrategies({ text: "Submit" }, "ocr")).toEqual(["ocr"]);
+    it("returns single strategy when explicitly set with text query", () => {
+        expect(getAvailableStrategies({ text: "Submit" }, "fiber")).toEqual(["fiber"]);
+        expect(getAvailableStrategies({ text: "Submit" }, "accessibility")).toEqual(["accessibility"]);
     });
     it("returns single strategy when explicitly set without text", () => {
         expect(getAvailableStrategies({ testID: "btn" }, "fiber")).toEqual(["fiber"]);
     });
-    it("returns accessibility+fiber+ocr for testID+text combo in auto mode", () => {
+    it("returns accessibility+fiber for testID+text combo in auto mode", () => {
         expect(getAvailableStrategies({ testID: "btn", text: "Submit" }, "auto")).toEqual([
             "accessibility",
             "fiber",
-            "ocr",
         ]);
     });
     it("returns fallback chain for component+text in auto mode", () => {
         expect(getAvailableStrategies({ component: "Button", text: "OK" }, "auto")).toEqual([
             "accessibility",
             "fiber",
-            "ocr",
         ]);
     });
     it("returns coordinate only even when text is also provided", () => {
         expect(getAvailableStrategies({ x: 100, y: 200, text: "Submit" }, "auto")).toEqual(["coordinate"]);
     });
-    it("returns fiber+ocr for explicit fiber with emoji text", () => {
-        expect(getAvailableStrategies({ text: "🔥 Fire" }, "fiber")).toEqual(["fiber", "ocr"]);
+    it("returns fiber for explicit fiber with emoji text", () => {
+        expect(getAvailableStrategies({ text: "🔥 Fire" }, "fiber")).toEqual(["fiber"]);
     });
 });
 
@@ -416,23 +409,6 @@ describe("formatTapFailure with screenshot and verification", () => {
     });
 });
 
-describe("toTapCoord returns image-pixel coordinates", () => {
-    it("returns raw OCR coordinate (scaleFactor ignored)", async () => {
-        const { toTapCoord } = await import("../../core/ocr.js");
-        // OCR coord 100 on downscaled image → returns 100 (image-pixel space)
-        // tap() handles un-downscaling and platform conversion
-        expect(toTapCoord(100, 1.368)).toBe(100);
-    });
-    it("rounds to integer", async () => {
-        const { toTapCoord } = await import("../../core/ocr.js");
-        expect(toTapCoord(100.6, 1.2)).toBe(101);
-    });
-    it("returns raw coord when scaleFactor is 1", async () => {
-        const { toTapCoord } = await import("../../core/ocr.js");
-        expect(toTapCoord(250, 1)).toBe(250);
-    });
-});
-
 describe("buildVerificationExplanation", () => {
     it("explains persistent visual change", () => {
         const explanation = buildVerificationExplanation({
@@ -631,7 +607,6 @@ describe("isTapTimeout", () => {
         expect(
             isTapTimeout([
                 { strategy: "fiber", reason: "No element found matching testID=\"foo\"" },
-                { strategy: "ocr", reason: "No OCR text matched" },
             ])
         ).toBe(false);
     });
@@ -640,152 +615,13 @@ describe("isTapTimeout", () => {
         expect(isTapTimeout([])).toBe(false);
     });
 
-    it("accepts accessibility, ocr, and coordinate wrapper formats", () => {
+    it("accepts accessibility and coordinate wrapper formats", () => {
         expect(
             isTapTimeout([{ strategy: "accessibility", reason: "accessibility timed out after 3000ms" }])
         ).toBe(true);
-        expect(isTapTimeout([{ strategy: "ocr", reason: "ocr timed out after 5000ms" }])).toBe(true);
         expect(
             isTapTimeout([{ strategy: "coordinate", reason: "coordinate timed out after 3000ms" }])
         ).toBe(true);
     });
 });
 
-describe("findOcrMatch", () => {
-    function makeWord(text: string, tap: { x: number; y: number }) {
-        return {
-            text,
-            confidence: 0.99,
-            bbox: { x0: 0, y0: 0, x1: 10, y1: 10 },
-            center: tap,
-            tapCenter: tap,
-        };
-    }
-    function makeLine(text: string, tap: { x: number; y: number }) {
-        return {
-            text,
-            confidence: 0.99,
-            bbox: { x0: 0, y0: 0, x1: 100, y1: 10 },
-            center: tap,
-            tapCenter: tap,
-        };
-    }
-    function makeResult(opts: {
-        words?: ReturnType<typeof makeWord>[];
-        lines?: ReturnType<typeof makeLine>[];
-    }): OCRResult {
-        return {
-            success: true,
-            fullText: "",
-            confidence: 0.99,
-            words: opts.words ?? [],
-            lines: opts.lines ?? [],
-            processingTimeMs: 0,
-            engine: "cloud",
-        };
-    }
-
-    it("matches a single-word query against words (regression guard)", () => {
-        const result = makeResult({
-            words: [makeWord("Submit", { x: 50, y: 100 })],
-        });
-        const match = findOcrMatch(result, "Submit");
-        expect(match).not.toBeNull();
-        expect(match!.text).toBe("Submit");
-        expect(match!.tapCenter).toEqual({ x: 50, y: 100 });
-    });
-
-    it("matches a multi-word query against a line when the line equals the phrase", () => {
-        const result = makeResult({
-            words: [makeWord("Save", { x: 10, y: 20 }), makeWord("a", { x: 30, y: 20 })],
-            lines: [makeLine("Save a full copy", { x: 200, y: 300 })],
-        });
-        const match = findOcrMatch(result, "Save a full copy");
-        expect(match).not.toBeNull();
-        expect(match!.tapCenter).toEqual({ x: 200, y: 300 });
-    });
-
-    it("matches a multi-word query against a line that contains the phrase as a substring", () => {
-        const result = makeResult({
-            lines: [makeLine("Please Sign In with Google to continue", { x: 400, y: 500 })],
-        });
-        const match = findOcrMatch(result, "Sign In with Google");
-        expect(match).not.toBeNull();
-        expect(match!.tapCenter).toEqual({ x: 400, y: 500 });
-    });
-
-    it("is case-insensitive on both word and line paths", () => {
-        const wordOnly = makeResult({ words: [makeWord("SUBMIT", { x: 1, y: 2 })] });
-        expect(findOcrMatch(wordOnly, "submit")!.tapCenter).toEqual({ x: 1, y: 2 });
-
-        const lineOnly = makeResult({ lines: [makeLine("save A FULL copy", { x: 3, y: 4 })] });
-        expect(findOcrMatch(lineOnly, "Save a Full Copy")!.tapCenter).toEqual({ x: 3, y: 4 });
-    });
-
-    it("survives whitespace/punctuation differences and non-Latin characters", () => {
-        const result = makeResult({
-            lines: [
-                makeLine("Moeez's    Cookbook", { x: 5, y: 6 }),
-                makeLine("Pozwalaj, gdy używam aplikacji", { x: 7, y: 8 }),
-            ],
-        });
-        expect(findOcrMatch(result, "  Moeez's Cookbook  ")!.tapCenter).toEqual({ x: 5, y: 6 });
-        expect(findOcrMatch(result, "Pozwalaj, gdy używam aplikacji")!.tapCenter).toEqual({ x: 7, y: 8 });
-    });
-
-    it("returns null when neither words nor lines contain the query", () => {
-        const result = makeResult({
-            words: [makeWord("Hello", { x: 0, y: 0 })],
-            lines: [makeLine("World peace", { x: 0, y: 0 })],
-        });
-        expect(findOcrMatch(result, "Sign In with Google")).toBeNull();
-    });
-
-    it("reconstructs phrases from same-line words when the OCR engine fragmented them (gifted.co regression)", () => {
-        // Models the gifted.co login screen where iOS Vision returned "Continue", "with",
-        // "Google" as three separate word detections (the leading G icon disrupts the
-        // engine's line-baseline grouping). No OCRLine entry is provided.
-        function rowWord(text: string, x: number, y: number, x1: number, y1: number) {
-            const tap = { x: (x + x1) / 2, y: (y + y1) / 2 };
-            return { text, confidence: 0.95, bbox: { x0: x, y0: y, x1, y1 }, center: tap, tapCenter: tap };
-        }
-        const result = makeResult({
-            words: [
-                rowWord("Continue", 100, 480, 200, 510),
-                rowWord("with", 210, 480, 260, 510),
-                rowWord("Google", 270, 480, 360, 510),
-                // Adjacent button on a different y-band — must not get joined.
-                rowWord("Continue", 100, 540, 200, 570),
-                rowWord("with", 210, 540, 260, 570),
-                rowWord("Apple", 270, 540, 350, 570),
-            ],
-        });
-        const match = findOcrMatch(result, "Continue with Google");
-        expect(match).not.toBeNull();
-        // tapCenter narrowed to the three matching words — average of their tap centers
-        // (not the whole reconstructed line, and definitely not the Apple row).
-        expect(match!.tapCenter.x).toBeCloseTo((150 + 235 + 315) / 3, 0);
-        expect(match!.tapCenter.y).toBeCloseTo(495, 0);
-    });
-
-    it("refines tap center to matched words inside a wider reconstructed line (horizontal-button-row case)", () => {
-        // Models Boardwise's "Yes Remotely No" row of three side-by-side buttons. Query
-        // for one of them should tap that button, not the centroid of all three.
-        function rowWord(text: string, x: number, y: number, x1: number, y1: number) {
-            const tap = { x: (x + x1) / 2, y: (y + y1) / 2 };
-            return { text, confidence: 0.95, bbox: { x0: x, y0: y, x1, y1 }, center: tap, tapCenter: tap };
-        }
-        const result = makeResult({
-            words: [
-                rowWord("Yes", 100, 100, 180, 130),
-                rowWord("Remotely", 220, 100, 380, 130),
-                rowWord("No", 420, 100, 480, 130),
-            ],
-        });
-        const match = findOcrMatch(result, "Remotely");
-        expect(match).not.toBeNull();
-        // Should tap inside the "Remotely" bbox, not at the centroid of all three.
-        expect(match!.tapCenter.x).toBe(300);
-        expect(match!.tapCenter.y).toBe(115);
-    });
-});

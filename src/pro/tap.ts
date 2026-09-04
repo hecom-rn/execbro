@@ -1,7 +1,6 @@
 import { connectedApps } from "../core/state.js";
 import type { CoordinateMissDiagnosis } from "./coordinateMiss.js";
 import type { ConnectedApp, DevicePlatform } from "../core/types.js";
-import type { OCRResult, OCRWord } from "../core/ocr.js";
 import { executeInApp } from "../core/executor.js";
 import { pressElement } from "../core/executor.js";
 import {
@@ -28,7 +27,7 @@ import {
 
 // --- Types ---
 
-export type TapStrategy = "auto" | "fiber" | "accessibility" | "ocr" | "coordinate";
+export type TapStrategy = "auto" | "fiber" | "accessibility" | "coordinate";
 
 export interface TapQuery {
     text?: string;
@@ -234,7 +233,7 @@ export interface LongPressReport {
     durationMs: number;
     /**
      * true / false when the fiber strategy inspected the element; null when the
-     * strategy that resolved it (accessibility, OCR, coordinates) has no view of
+     * strategy that resolved it (accessibility, coordinates) has no view of
      * the handlers. null means "not knowable here", never "no handler".
      */
     handlerFound: boolean | null;
@@ -273,7 +272,6 @@ export interface TapResult {
     // Failure-artifact signals (populated by captureFailureArtifact when outcome warrants).
     // Forwarded to telemetry blobs 16-20 by the index.ts wrapper.
     artifactKey?: string;
-    ocrClosestMatch?: string;
     fiberPressableCount?: string;
     accessibilityMatchCount?: string;
     appRoute?: string;
@@ -400,150 +398,11 @@ export function hasProblematicUnicode(text: string): boolean {
   return emojiPattern.test(text);
 }
 
-export interface OcrMatch {
-    text: string;
-    tapCenter: { x: number; y: number };
-}
-
-function normalizeForMatch(text: string): string {
-    return text.trim().replace(/\s+/g, " ").toLowerCase();
-}
-
-/**
- * 2026-05-16: Reconstruct lines from individual OCR words when the engine fragmented a
- * visible phrase across separate word detections. This happens when a leading icon
- * (Google "G", Apple logo, Microsoft squares) disrupts iOS Vision's line-baseline
- * grouping, so "Continue with Google" comes back as three separate words instead of
- * one OCRLine. Without this, findOcrMatch's word/line substring scan misses the phrase.
- *
- * Grouping rule: words whose vertical centers are within half the running median word
- * height land on the same reconstructed line. Words are sorted left-to-right within
- * the line and joined with a single space. Exported for unit tests.
- */
-export interface ReconstructedOcrLine {
-    text: string;
-    bbox: { x0: number; y0: number; x1: number; y1: number };
-    tapCenter: { x: number; y: number };
-    words: OCRWord[];
-}
-
-export function reconstructLinesFromWords(words: OCRWord[]): ReconstructedOcrLine[] {
-    if (!words.length) return [];
-    const sorted = [...words].sort((a, b) => a.bbox.y0 - b.bbox.y0);
-    const groups: OCRWord[][] = [];
-    let current: OCRWord[] = [];
-    let runningMidY = -Infinity;
-    let runningHeight = 0;
-    for (const w of sorted) {
-        const wMid = (w.bbox.y0 + w.bbox.y1) / 2;
-        const wHeight = Math.max(1, w.bbox.y1 - w.bbox.y0);
-        const tolerance = Math.min(wHeight, runningHeight || wHeight) * 0.5;
-        if (current.length === 0 || Math.abs(wMid - runningMidY) <= tolerance) {
-            current.push(w);
-            const n = current.length;
-            runningMidY = runningMidY === -Infinity ? wMid : (runningMidY * (n - 1) + wMid) / n;
-            runningHeight = (runningHeight * (n - 1) + wHeight) / n;
-        } else {
-            groups.push(current);
-            current = [w];
-            runningMidY = wMid;
-            runningHeight = wHeight;
-        }
-    }
-    if (current.length > 0) groups.push(current);
-
-    return groups.map(group => {
-        const sortedWords = [...group].sort((a, b) => a.bbox.x0 - b.bbox.x0);
-        const text = sortedWords.map(w => w.text).join(" ");
-        const x0 = Math.min(...sortedWords.map(w => w.bbox.x0));
-        const y0 = Math.min(...sortedWords.map(w => w.bbox.y0));
-        const x1 = Math.max(...sortedWords.map(w => w.bbox.x1));
-        const y1 = Math.max(...sortedWords.map(w => w.bbox.y1));
-        const tapX = sortedWords.reduce((s, w) => s + w.tapCenter.x, 0) / sortedWords.length;
-        const tapY = sortedWords.reduce((s, w) => s + w.tapCenter.y, 0) / sortedWords.length;
-        return { text, bbox: { x0, y0, x1, y1 }, tapCenter: { x: tapX, y: tapY }, words: sortedWords };
-    });
-}
-
-/**
- * Narrow the tap point to just the words that produced the substring match.
- * Without this, a query for "Remotely" against a reconstructed line "Yes Remotely No"
- * would tap at the line's centroid (middle of "Remotely" in this case, but easily wrong
- * for asymmetric layouts). Tracks character offsets through the joined text so we know
- * which constituent words contributed to the matched range.
- */
-function refineTapCenterToMatchingWords(
-    line: ReconstructedOcrLine,
-    normalizedNeedle: string
-): { x: number; y: number } {
-    const normalizedFull = normalizeForMatch(line.text);
-    const startChar = normalizedFull.indexOf(normalizedNeedle);
-    if (startChar < 0) return line.tapCenter;
-    const endChar = startChar + normalizedNeedle.length;
-
-    let offset = 0;
-    const covered: OCRWord[] = [];
-    for (const w of line.words) {
-        const wNorm = normalizeForMatch(w.text);
-        const wordStart = offset;
-        const wordEnd = offset + wNorm.length;
-        // Word overlaps the matched range
-        if (wordEnd > startChar && wordStart < endChar) {
-            covered.push(w);
-        }
-        offset = wordEnd + 1; // +1 for the joining space
-    }
-    if (covered.length === 0) return line.tapCenter;
-    const tapX = covered.reduce((s, w) => s + w.tapCenter.x, 0) / covered.length;
-    const tapY = covered.reduce((s, w) => s + w.tapCenter.y, 0) / covered.length;
-    return { x: tapX, y: tapY };
-}
-
-export function findOcrMatch(ocrResult: OCRResult, query: string): OcrMatch | null {
-    const needle = normalizeForMatch(query);
-    if (!needle) return null;
-
-    const words = ocrResult.words ?? [];
-    const lines = ocrResult.lines ?? [];
-
-    const exactWord = words.find((w) => normalizeForMatch(w.text) === needle);
-    if (exactWord) return { text: exactWord.text, tapCenter: exactWord.tapCenter };
-
-    const exactLine = lines.find((l) => normalizeForMatch(l.text) === needle);
-    if (exactLine) return { text: exactLine.text, tapCenter: exactLine.tapCenter };
-
-    const substringLine = lines.find((l) => normalizeForMatch(l.text).includes(needle));
-    if (substringLine) return { text: substringLine.text, tapCenter: substringLine.tapCenter };
-
-    const substringWord = words.find((w) => normalizeForMatch(w.text).includes(needle));
-    if (substringWord) return { text: substringWord.text, tapCenter: substringWord.tapCenter };
-
-    // Fall through to phrases reconstructed from word detections. Tap point is
-    // refined to only the words covering the matched substring, so a query for
-    // "Continue with Google" inside "[icon] Continue with Google" lands on the
-    // text run instead of the line centroid (and won't drift onto the icon).
-    const reconstructed = reconstructLinesFromWords(words);
-    const exactRecon = reconstructed.find((l) => normalizeForMatch(l.text) === needle);
-    if (exactRecon) {
-        return { text: exactRecon.text, tapCenter: refineTapCenterToMatchingWords(exactRecon, needle) };
-    }
-    const substringRecon = reconstructed.find((l) => normalizeForMatch(l.text).includes(needle));
-    if (substringRecon) {
-        return { text: substringRecon.text, tapCenter: refineTapCenterToMatchingWords(substringRecon, needle) };
-    }
-
-    return null;
-}
-
 export function getAvailableStrategies(query: TapQuery, strategy: TapStrategy): string[] {
     if (query.x !== undefined && query.y !== undefined) {
         return ["coordinate"];
     }
     if (strategy !== "auto") {
-        // Always fallback to OCR for text queries — explicit strategy may miss visible text
-        if (query.text && strategy !== "ocr" && strategy !== "coordinate") {
-            return [strategy, "ocr"];
-        }
         return [strategy];
     }
     if (query.component && !query.text && !query.testID) {
@@ -558,10 +417,9 @@ export function getAvailableStrategies(query: TapQuery, strategy: TapStrategy): 
         if (!hasProblematicUnicode(query.text)) {
             strategies.push("fiber");
         }
-        strategies.push("ocr");
         return strategies;
     }
-    return ["fiber", "accessibility", "ocr"];
+    return ["fiber", "accessibility"];
 }
 
 /**
@@ -571,7 +429,7 @@ export function getAvailableStrategies(query: TapQuery, strategy: TapStrategy): 
  * For Android: screenshot pixels → device pixels (undo downscale)
  *
  * IMPORTANT: Only use this for EXTERNAL coordinates from screenshots.
- * Internal strategies (OCR, accessibility, fiber) produce tap-ready coordinates
+ * Internal strategies (accessibility, fiber) produce tap-ready coordinates
  * and call iosTap/androidTap directly — they must NOT go through this function.
  */
 export function convertScreenshotToTapCoords(
@@ -835,93 +693,13 @@ export interface EvidenceSink {
             frame?: { x: number; y: number; width: number; height: number };
         }>;
     };
-    ocr: {
-        ran: boolean;
-        durationMs: number;
-        detections: Array<{
-            text: string;
-            bbox: [number, number, number, number];
-            conf: number;
-        }>;
-        closestMatch: { text: string; score: number } | null;
-        /**
-         * The best OCR candidate found, with tap-ready coordinates and the
-         * scale factor used to capture the screenshot. Set as soon as
-         * findOcrMatch resolves, BEFORE any tap-execution code runs, so the
-         * orchestrator can recover from a 30ms-late OCR strategy timeout when
-         * the candidate score is high enough (Step 2 in 2026-05-15 plan).
-         */
-        bestCandidate: {
-            text: string;
-            score: number;
-            tapCenter: { x: number; y: number };
-            scaleFactor: number;
-        } | null;
-    };
 }
 
 export function makeEmptyEvidenceSink(): EvidenceSink {
     return {
         fiber: { ran: false, durationMs: 0, metroConnected: false, pressables: [] },
-        accessibility: { ran: false, durationMs: 0, elements: [] },
-        ocr: { ran: false, durationMs: 0, detections: [], closestMatch: null, bestCandidate: null }
+        accessibility: { ran: false, durationMs: 0, elements: [] }
     };
-}
-
-function ocrSimilarity(a: string, b: string): number {
-    if (!a || !b) return 0;
-    if (a === b) return 1;
-    // Dice coefficient over character bigrams (case/space-insensitive)
-    const bigrams = (s: string): Map<string, number> => {
-        const m = new Map<string, number>();
-        if (s.length < 2) {
-            if (s) m.set(s, 1);
-            return m;
-        }
-        for (let i = 0; i < s.length - 1; i++) {
-            const bg = s.slice(i, i + 2);
-            m.set(bg, (m.get(bg) ?? 0) + 1);
-        }
-        return m;
-    };
-    const ag = bigrams(a);
-    const bg = bigrams(b);
-    let intersection = 0;
-    for (const [k, va] of ag) {
-        const vb = bg.get(k);
-        if (vb) intersection += Math.min(va, vb);
-    }
-    const total = Array.from(ag.values()).reduce((s, v) => s + v, 0)
-        + Array.from(bg.values()).reduce((s, v) => s + v, 0);
-    if (!total) return 0;
-    return (2 * intersection) / total;
-}
-
-export function findClosestOcrText(
-    ocrResult: OCRResult,
-    query: string
-): { text: string; score: number } | null {
-    if (!query) return null;
-    const needle = normalizeForMatch(query);
-    if (!needle) return null;
-    const candidates: Array<{ text: string }> = [];
-    if (ocrResult?.words?.length) candidates.push(...ocrResult.words.map(w => ({ text: w.text })));
-    if (ocrResult?.lines?.length) candidates.push(...ocrResult.lines.map(l => ({ text: l.text })));
-    // Include reconstructed phrases so the diagnostic surfaces "Continue with Google@1.00"
-    // instead of "Continue@0.54" when the engine fragmented a multi-word phrase into
-    // separate word detections.
-    if (ocrResult?.words?.length) {
-        candidates.push(...reconstructLinesFromWords(ocrResult.words).map(l => ({ text: l.text })));
-    }
-    if (!candidates.length) return null;
-    let best: { text: string; score: number } | null = null;
-    for (const c of candidates) {
-        const norm = normalizeForMatch(c.text);
-        if (!norm) continue;
-        const score = ocrSimilarity(needle, norm);
-        if (!best || score > best.score) best = { text: c.text, score };
-    }
-    return best;
 }
 
 // --- Strategy Functions ---
@@ -1417,165 +1195,6 @@ async function tryAccessibilityStrategy(
     }
 }
 
-/**
- * Run OCR sense (capture + recognize + match) and tap the match. Also records
- * `sink.ocr.bestCandidate` (matched text + tap coords) into the evidence sink,
- * which is serialized into the R2 failure bundle for diagnostics.
- */
-async function tryOcrStrategy(query: TapQuery, platform: DevicePlatform, udid?: string, sink?: EvidenceSink, signal?: AbortSignal, deviceId?: string, hdcKey?: string, duration?: number): Promise<StrategyResult> {
-    if (sink) sink.ocr.ran = true;
-    const ocrStartedAt = Date.now();
-    try {
-        const searchText = query.text;
-        if (!searchText) {
-            return { success: false, reason: "OCR strategy requires text query" };
-        }
-
-        let imageBuffer: Buffer;
-        let scaleFactor = 1;
-
-        if (platform === "ios") {
-            const screenshot = await iosScreenshot(undefined, udid);
-            if (!screenshot.success || !screenshot.data) {
-                return {
-                    success: false,
-                    reason: "Failed to capture iOS screenshot for OCR"
-                };
-            }
-            imageBuffer = screenshot.data;
-            scaleFactor = screenshot.scaleFactor ?? 1;
-        } else if (platform === "harmony") {
-            const { harmonyScreenshot } = await import("../core/harmony.js");
-            const screenshot = await harmonyScreenshot(undefined, hdcKey);
-            if (!screenshot.success || !screenshot.data) {
-                return {
-                    success: false,
-                    reason: "Failed to capture HarmonyOS screenshot for OCR"
-                };
-            }
-            imageBuffer = screenshot.data;
-            scaleFactor = screenshot.scaleFactor ?? 1;
-        } else {
-            const { androidScreenshot } = await import("../core/android.js");
-            const screenshot = await androidScreenshot(undefined, deviceId, signal);
-            if (!screenshot.success || !screenshot.data) {
-                return {
-                    success: false,
-                    reason: "Failed to capture Android screenshot for OCR"
-                };
-            }
-            imageBuffer = screenshot.data;
-            scaleFactor = screenshot.scaleFactor ?? 1;
-        }
-
-        const { recognizeText } = await import("../core/ocr.js");
-        const ocrResult = await recognizeText(imageBuffer, {
-            scaleFactor,
-            platform,
-            signal
-        });
-
-        if (sink && ocrResult) {
-            const allDetections = [
-                ...(ocrResult.words ?? []),
-                ...(ocrResult.lines ?? [])
-            ];
-            sink.ocr.detections = allDetections.slice(0, 100).map(r => ({
-                text: r.text,
-                bbox: [r.bbox.x0, r.bbox.y0, r.bbox.x1 - r.bbox.x0, r.bbox.y1 - r.bbox.y0] as [number, number, number, number],
-                conf: r.confidence ?? 0
-            }));
-            sink.ocr.closestMatch = findClosestOcrText(ocrResult, searchText);
-        }
-
-        const match = findOcrMatch(ocrResult, searchText);
-
-        // Record the best candidate (matched text + tap coords) into the
-        // evidence sink. This is serialized into the R2 failure bundle and is
-        // useful when diagnosing OCR taps (e.g. OCR found the match at these
-        // coords but the tap didn't register a visual change).
-        if (sink && match) {
-            const closest = sink.ocr.closestMatch;
-            sink.ocr.bestCandidate = {
-                text: match.text,
-                score: closest && closest.text === match.text ? closest.score : 1,
-                tapCenter: { x: match.tapCenter.x, y: match.tapCenter.y },
-                scaleFactor
-            };
-        }
-
-        if (!match) {
-            return {
-                success: false,
-                reason: `OCR did not find text "${searchText}" on screen`
-            };
-        }
-
-        if (platform === "ios") {
-            // tapCenter is in image-pixel space (downscaled) — convert to points
-            const { getDevicePixelRatio } = await import("../core/ios.js");
-            const dpr = await getDevicePixelRatio(udid);
-            const tapResult = await iosTap(
-                Math.round((match.tapCenter.x * scaleFactor) / dpr),
-                Math.round((match.tapCenter.y * scaleFactor) / dpr),
-                { udid, duration }
-            );
-            if (!tapResult.success) {
-                return {
-                    success: false,
-                    reason: `OCR found "${match.text}" but tap failed: ${tapResult.error}`
-                };
-            }
-        } else if (platform === "harmony") {
-            // HarmonyOS: image-pixel -> device-pixel, hdc uiInput accepts pixels
-            const { harmonyTap } = await import("../core/harmony.js");
-            const ocrTap = await harmonyTap(
-                Math.round(match.tapCenter.x * scaleFactor),
-                Math.round(match.tapCenter.y * scaleFactor),
-                hdcKey
-            );
-            if (!ocrTap.success) {
-                return {
-                    success: false,
-                    reason: `OCR found "${match.text}" but tap failed: ${ocrTap.error}`
-                };
-            }
-        } else {
-            // Android: image-pixel → device-pixel (undo downscale), ADB accepts pixels
-            const ocrTap = await androidTap(
-                Math.round(match.tapCenter.x * scaleFactor),
-                Math.round(match.tapCenter.y * scaleFactor),
-                deviceId,
-                duration
-            );
-            if (!ocrTap.success) {
-                return {
-                    success: false,
-                    reason: `OCR found "${match.text}" but tap failed: ${ocrTap.error}`
-                };
-            }
-        }
-
-        return {
-            success: true,
-            reason: "Tapped via OCR text recognition",
-            text: match.text,
-            convertedTo: {
-                x: match.tapCenter.x,
-                y: match.tapCenter.y,
-                unit: "pixels"
-            }
-        };
-    } catch (err) {
-        return {
-            success: false,
-            reason: `OCR strategy error: ${err instanceof Error ? err.message : String(err)}`
-        };
-    } finally {
-        if (sink) sink.ocr.durationMs = Date.now() - ocrStartedAt;
-    }
-}
-
 async function tryCoordinateStrategy(
     pixelX: number,
     pixelY: number,
@@ -1661,41 +1280,13 @@ async function tryCoordinateStrategy(
 const TAP_TIMEOUT_MS = 25000;
 const MIN_STRATEGY_BUDGET_MS = 500;
 
-/** One React commit plus layout. Long enough for a just-navigated screen to paint. */
-const EMPTY_SCREEN_SETTLE_MS = 400;
-
-/**
- * True when both element strategies ran cleanly and between them saw *nothing* —
- * zero pressables and zero accessibility elements.
- *
- * That is not "the element isn't here", it is "the screen isn't here". A mounted
- * RN screen always has something in at least one of the two trees, so this
- * signature means the read landed in the gap right after a navigation or reload,
- * before the new screen committed. It matters because OCR runs next and OCR does
- * not fail quietly: it returns a confident closest-match for whatever text is
- * painted, which is how `tap({text})` right after a reload taps the wrong thing
- * and then succeeds unchanged on a manual retry.
- *
- * Both must have *run* — a strategy that timed out or was skipped proves nothing.
- */
-export function screenLooksUnmounted(evidence: EvidenceSink | undefined): boolean {
-    if (!evidence) return false;
-    return (
-        evidence.fiber.ran &&
-        evidence.fiber.pressables.length === 0 &&
-        evidence.accessibility.ran &&
-        evidence.accessibility.elements.length === 0
-    );
-}
 /**
  * Ceiling for the pre-dispatch overlay check. It shares the tap's deadline with the
  * strategies that follow, so it must not be able to spend the whole budget on a fiber
  * read — a screen big enough to make this slow is exactly when the tap still needs time.
  */
 const OVERLAY_GUARD_BUDGET_MS = 3000;
-// Per-strategy budget. OCR cap on Android is bumped via maxStrategyMs() because
-// the ADB screencap+pull leg has ~2s variance on real devices; iOS stays at 5s
-// where xcrun simctl screenshot is consistent.
+// Per-strategy budget.
 // Heavy strategies (fiber on deep trees with multi-depth retries, axe accessibility
 // dumps on dense iOS screens) need more headroom — previous caps produced spurious
 // timeouts that the agent read as "element missing" when the strategy simply didn't
@@ -1708,19 +1299,18 @@ const OVERLAY_GUARD_BUDGET_MS = 3000;
 const MAX_STRATEGY_MS: Record<string, number> = {
     fiber: 8000,
     accessibility: 6000,
-    ocr: 6000,
     coordinate: 8000
 };
 
 function maxStrategyMs(strategy: string, platform: DevicePlatform): number {
-    if (strategy === "ocr" && platform === "android") return 9000;
+    void platform;
     return MAX_STRATEGY_MS[strategy] ?? 5000;
 }
 
 // Matches only the outer withTimeout wrapper message for a tap strategy.
 // Nested sub-operation errors inside a strategy (e.g. "CDP getProperties timed out after 150ms")
 // must NOT be classified as a tap-level timeout.
-const STRATEGY_TIMEOUT_RE = /^(fiber|accessibility|ocr|coordinate) timed out after \d+ms$/;
+const STRATEGY_TIMEOUT_RE = /^(fiber|accessibility|coordinate) timed out after \d+ms$/;
 
 export function isTapTimeout(attempted: readonly { reason: string; strategy?: string; outcome?: TapAttemptOutcome }[]): boolean {
     return attempted.some(
@@ -1747,7 +1337,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 /**
  * Like withTimeout, but creates an AbortController whose signal is handed to
  * the inner factory. On timeout the signal aborts so subprocess work
- * (uiautomator dump, OCR fetch, screencap) can be killed instead of running
+ * (uiautomator dump, screencap) can be killed instead of running
  * past the strategy cap and bleeding into total tap duration.
  */
 function withCancelableTimeout<T>(
@@ -1771,7 +1361,6 @@ function withCancelableTimeout<T>(
  * Compute marker coordinates in screenshot-pixel space (what the returned PNG uses).
  * Unit rules by strategy, assuming screenshotScale = downscale factor:
  *   coordinate  : input is already screenshot pixels → pass through
- *   ocr         : match.tapCenter is image-pixel (= screenshot-pixel) → pass through
  *   iOS points  : point * DPR / screenshotScale
  *   android dp  : dp * densityScale / screenshotScale
  *   android devicePx : devicePx / screenshotScale
@@ -1792,9 +1381,6 @@ function computeMarkerPx(args: {
         return input ? { x: input.x, y: input.y } : undefined;
     }
     if (!convertedTo) return undefined;
-    if (strategy === "ocr") {
-        return { x: Math.round(convertedTo.x), y: Math.round(convertedTo.y) };
-    }
     if (platform === "ios") {
         // fiber/accessibility on iOS return points
         const dpr = devicePixelRatio || 3;
@@ -2010,12 +1596,6 @@ async function captureTapArtifact(ctx: ArtifactCaptureContext): Promise<CaptureS
             meaningful: ctx.verification?.meaningful,
             senses: ctx.evidence
                 ? {
-                    ocr: {
-                        ran: ctx.evidence.ocr.ran,
-                        durationMs: ctx.evidence.ocr.durationMs,
-                        detections: ctx.evidence.ocr.detections,
-                        closestMatch: ctx.evidence.ocr.closestMatch
-                    },
                     fiber: {
                         ran: ctx.evidence.fiber.ran,
                         durationMs: ctx.evidence.fiber.durationMs,
@@ -2042,7 +1622,6 @@ async function captureTapArtifact(ctx: ArtifactCaptureContext): Promise<CaptureS
                     }
                 }
                 : {
-                    ocr: { ran: false, durationMs: 0, detections: [], closestMatch: null },
                     fiber: {
                         ran: ctx.attempted.some(a => a.strategy === "fiber"),
                         durationMs: 0,
@@ -2080,15 +1659,11 @@ async function captureTapArtifact(ctx: ArtifactCaptureContext): Promise<CaptureS
 function attachArtifactSignals(result: TapResult, signals: CaptureSignals | undefined): TapResult {
     if (!signals) return result;
     if (signals.artifactKey) result.artifactKey = signals.artifactKey;
-    if (signals.ocrClosestMatch) result.ocrClosestMatch = signals.ocrClosestMatch;
     if (signals.fiberPressableCount) result.fiberPressableCount = signals.fiberPressableCount;
     if (signals.accessibilityMatchCount) result.accessibilityMatchCount = signals.accessibilityMatchCount;
     if (signals.appRoute) result.appRoute = signals.appRoute;
     // Append agent-facing hints to error message
     if (result.error) {
-        if (signals.ocrClosestMatch) {
-            result.error = `${result.error}\nClosest OCR match: ${signals.ocrClosestMatch}`;
-        }
         if (signals.nearbyPressables.length > 0) {
             const labels = signals.nearbyPressables
                 .map(p => p.testID || p.label)
@@ -2356,7 +1931,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
     const evidence = makeEmptyEvidenceSink();
 
     // Early UI driver check for iOS — fail fast instead of falling through every strategy
-    const UI_DRIVER_REQUIRED_STRATEGIES = ["accessibility", "ocr", "coordinate"];
+    const UI_DRIVER_REQUIRED_STRATEGIES = ["accessibility", "coordinate"];
     let uiDriverMissing = false;
     if (platform === "ios") {
         uiDriverMissing = !(await isUiDriverAvailable());
@@ -2394,7 +1969,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         if (uiDriverMissing && UI_DRIVER_REQUIRED_STRATEGIES.includes(strat)) {
             attempted.push({
                 strategy: strat,
-                reason: "Skipped — iOS UI driver is not installed (required for iOS tap/accessibility/OCR)",
+                reason: "Skipped — iOS UI driver is not installed (required for iOS tap/accessibility)",
                 outcome: "skipped"
             });
             return false;
@@ -2513,21 +2088,8 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         }
     }
 
-    // OCR runs lazily when the loop reaches it (see the `case "ocr"` branch).
-    // A concurrent pre-warm probe used to fire here to shave ~5s off OCR-win
-    // rows, but it dispatched a paid Google Vision request at t=0 on every
-    // text-predicate tap — and since cloud OCR (~200ms) finishes well before
-    // the higher-priority strategy that usually wins, the post-win abort came
-    // too late to cancel the billed request. OCR wins only ~1.9% of taps, so
-    // the pre-warm paid for cloud Vision on ~42% of eligible taps to help a
-    // tiny minority. Removed 2026-06-02; the timeout-recovery path below still
-    // salvages the perfect-match-past-cap case.
-    // Execute strategies in order with per-strategy caps and overall budget
-    // `strat` is reassigned when the empty-screen replay below resolves the tap
-    // through a different strategy — every downstream use (marker geometry,
-    // reported method) must name the strategy that actually pressed.
-    let emptyScreenReplayed = false;
-    for (let strat of filteredStrategies) {
+    // Execute strategies in order with per-strategy caps and overall budget.
+    for (const strat of filteredStrategies) {
         const remaining = remainingMs();
         if (remaining < MIN_STRATEGY_BUDGET_MS) {
             attempted.push({
@@ -2557,57 +2119,6 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                         `accessibility`
                     );
                     break;
-                case "ocr": {
-                    // Before letting OCR answer for a screen that had no elements at
-                    // all, give the tree one settle and ask again. OCR cannot tell a
-                    // half-painted screen from a settled one, so without this the
-                    // caller gets a confident match against whatever was mid-paint.
-                    if (!emptyScreenReplayed && screenLooksUnmounted(evidence)) {
-                        emptyScreenReplayed = true;
-                        attempted.push({
-                            strategy: "settle",
-                            reason: `Screen had zero pressables and zero accessibility elements — not settled yet. Waited ${EMPTY_SCREEN_SETTLE_MS}ms and re-read before falling back to OCR.`,
-                            outcome: "not-found"
-                        });
-                        await new Promise((r) => setTimeout(r, EMPTY_SCREEN_SETTLE_MS));
-
-                        let replayed: StrategyResult | null = null;
-                        for (const replayStrat of ["fiber", "accessibility"] as const) {
-                            if (!filteredStrategies.includes(replayStrat)) continue;
-                            const replayBudget = Math.min(maxStrategyMs(replayStrat, platform), remainingMs());
-                            if (replayBudget < MIN_STRATEGY_BUDGET_MS) continue;
-                            let replayResult: StrategyResult;
-                            try {
-                                replayResult = replayStrat === "fiber"
-                                    ? await withTimeout(tryFiberStrategy(query, index, maxTraversalDepth, evidence, deviceName, options.duration !== undefined), replayBudget, `fiber`)
-                                    : await withCancelableTimeout(
-                                        (signal) => tryAccessibilityStrategy(query, index, platform, targetUdid, evidence, signal, targetSerial, options.duration, targetHdcKey),
-                                        replayBudget,
-                                        `accessibility`
-                                    );
-                            } catch {
-                                // A replay that times out or throws is no worse than not
-                                // having replayed — fall through to OCR as before.
-                                continue;
-                            }
-                            if (replayResult.success) {
-                                strat = replayStrat;
-                                replayed = replayResult;
-                                break;
-                            }
-                        }
-                        if (replayed) {
-                            result = replayed;
-                            break;
-                        }
-                    }
-                    result = await withCancelableTimeout(
-                        (signal) => tryOcrStrategy(query, platform, targetUdid, evidence, signal, targetSerial, targetHdcKey, options.duration),
-                        budget,
-                        `ocr`
-                    );
-                    break;
-                }
                 case "coordinate":
                     // Prefer `beforeScaleFactor` (captured against `targetUdid` this turn)
                     // over `app.lastScreenshot.scaleFactor` (stale and may belong to a
@@ -2718,8 +2229,8 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                 screenshot,
                 verification
             });
-            // `result.hasLongPress` is set only by the fiber strategy; for accessibility,
-            // OCR and coordinate taps it is undefined, which the report renders as
+            // `result.hasLongPress` is set only by the fiber strategy; for accessibility
+            // and coordinate taps it is undefined, which the report renders as
             // "not knowable" rather than "no handler".
             const strategyLongPress = buildLongPressReport({
                 durationMs: options.duration,
@@ -3082,12 +2593,8 @@ function looksLikeVirtualizedListItem(testID: string): boolean {
 function buildSuggestion(query: TapQuery, triedStrategies: string[], platform: string): string {
     const suggestions: string[] = [];
 
-    if (!triedStrategies.includes("ocr") && query.text) {
-        suggestions.push("Try strategy='ocr' to find text visually on screen");
-    }
-
     if (query.text && query.text.length <= 2) {
-        suggestions.push("Very short text is unreliable for OCR — use testID or coordinates instead");
+        suggestions.push("Very short text is unreliable to match — use testID or coordinates instead");
     }
 
     if (query.text && hasProblematicUnicode(query.text)) {
@@ -3100,7 +2607,7 @@ function buildSuggestion(query: TapQuery, triedStrategies: string[], platform: s
         );
     }
 
-    if (query.testID && !triedStrategies.includes("ocr")) {
+    if (query.testID) {
         suggestions.push(
             "testID not found in fiber/accessibility tree — verify the element is on the current screen with a screenshot"
         );

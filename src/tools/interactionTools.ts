@@ -60,13 +60,13 @@ import { readKeyboardState } from "../core/keyboardMetrics.js";
 export const SWIPE_DEFAULT_DURATION_MS = 300;
 
 export function registerInteractionTools(server: McpServer): void {
-    // Tool: Unified tap — tries fiber, accessibility, OCR, coordinate strategies
+    // Tool: Unified tap — tries fiber, accessibility, coordinate strategies
     registerToolWithTelemetry(
         server,
         "tap",
         {
             description:
-                "Tap a UI element. Automatically tries multiple strategies: fiber tree (React), accessibility tree (native), and OCR (visual)." +
+                "Tap a UI element. Automatically tries multiple strategies: fiber tree (React), accessibility tree (native), and coordinates." +
                 primaryInteractionBanner() + "\n" +
                 "PURPOSE: Single unified tap entry point — resolves text/testID/component/coordinates into a real touch event on the correct device.\n" +
                 "WHEN TO USE: Any time you need to press a button, focus an input, open a menu, or verify a handler fires. Prefer testID, then text, then component, then (x,y) from a screenshot's pressables list.\n" +
@@ -81,7 +81,7 @@ export function registerInteractionTools(server: McpServer): void {
                     .string()
                     .optional()
                     .describe(
-                        "Visible text to match (case-insensitive substring). ASCII only for fiber strategy; OCR handles non-ASCII."
+                        "Visible text to match (case-insensitive substring). ASCII only for fiber strategy; testID handles non-ASCII text."
                     ),
                 testID: z
                     .string()
@@ -112,11 +112,11 @@ export function registerInteractionTools(server: McpServer): void {
                         "Y coordinate in pixels (from screenshot). Must provide both x and y."
                     ),
                 strategy: z
-                    .enum(["auto", "fiber", "accessibility", "ocr", "coordinate"])
+                    .enum(["auto", "fiber", "accessibility", "coordinate"])
                     .optional()
                     .default("auto")
                     .describe(
-                        '"auto" (default) tries fiber -> accessibility -> OCR. Set explicitly to skip strategies you know will fail.'
+                        '"auto" (default) tries fiber -> accessibility -> coordinate. Set explicitly to skip strategies you know will fail.'
                     ),
                 maxTraversalDepth: z.coerce
                     .number()
@@ -155,7 +155,7 @@ export function registerInteractionTools(server: McpServer): void {
                     .optional()
                     .describe(
                         "Run before/after screenshot diff to detect if the tap had a meaningful visual effect. " +
-                        "Default: true for coordinate/accessibility/ocr strategies, false for fiber. " +
+                        "Default: true for coordinate/accessibility strategies, false for fiber. " +
                         "Independent of `screenshot` — verify can run with screenshot=false (the diff is computed internally; image bytes are dropped). " +
                         "When skipped, the response contains `verification: { skipped: true, skippedReason }` so callers can tell apart \"ran clean\" from \"never ran\"."
                     ),
@@ -167,7 +167,7 @@ export function registerInteractionTools(server: McpServer): void {
                         "Use for context menus, drag starts, multi-select. React Native fires onLongPress at 500ms, so 800 is a safe default " +
                         "and anything under 500 will not trigger it. Omit for a normal tap. " +
                         "The response carries `longPress.handlerFound`: true/false when the fiber strategy inspected the element, " +
-                        "null when the strategy that resolved it (accessibility, OCR, coordinates) cannot see handlers."
+                        "null when the strategy that resolved it (accessibility, coordinates) cannot see handlers."
                     ),
                 burst: z
                     .boolean()
@@ -212,7 +212,7 @@ export function registerInteractionTools(server: McpServer): void {
             // Pack predicate + strategy mode + attempted strategies into errorContext for telemetry.
             // Always include the predicate so unmeaningful outcomes (no isError, no _errorMessage) still
             // carry triage context — otherwise blob8 ends up blank and the dashboard shows empty rows.
-            // e.g. "p={\"text\":\"Save\"}|s=ocr|fiber:no_pressable|ocr:no_match"
+            // e.g. "p={\"text\":\"Save\"}|s=coordinate|fiber:no_pressable"
             const stratPrefix = args.strategy && args.strategy !== "auto" ? `s=${args.strategy}|` : "";
             let predicatePrefix = "";
             try {
@@ -256,7 +256,6 @@ export function registerInteractionTools(server: McpServer): void {
                 _tapStrategy: result.method,
                 _iosDriver: result.platform === "ios" ? (process.env.IOS_DRIVER?.toLowerCase() || "axe") : undefined,
                 _artifactKey: result.artifactKey,
-                _ocrClosestMatch: result.ocrClosestMatch,
                 _fiberPressableCount: result.fiberPressableCount,
                 _accessibilityMatchCount: result.accessibilityMatchCount,
                 _appRoute: result.appRoute,

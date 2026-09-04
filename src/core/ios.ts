@@ -2153,10 +2153,39 @@ export async function getDevicePixelRatio(
   }
 
   // Fallback: infer DPR from screenshot pixel dimensions
-  const { inferIOSDevicePixelRatio } = await import("./ocr.js");
   const dpr = inferIOSDevicePixelRatio(pixelWidth, pixelHeight);
   dprCache.set(cacheKey, dpr);
   return dpr;
+}
+
+/**
+ * Infer iOS device pixel ratio from screenshot dimensions
+ * @3x devices: Most modern iPhones (width >= 1080)
+ * @2x devices: Older iPhones, iPads (width 640-1080 or width >= 1500 for iPads)
+ * @1x devices: Very old (rare)
+ */
+export function inferIOSDevicePixelRatio(width: number, height: number): number {
+    // Ensure we're looking at the shorter dimension for width
+    const shortSide = Math.min(width, height);
+    const longSide = Math.max(width, height);
+
+    // iPads are typically @2x regardless of size
+    // iPad resolutions have aspect ratios closer to 4:3 (e.g., 2048x2732)
+    const aspectRatio = longSide / shortSide;
+    if (aspectRatio < 1.5) {
+        // Likely an iPad (4:3 ish aspect ratio)
+        return 2;
+    }
+
+    // iPhones: Check short side dimension
+    // @3x phones have short side >= 1080 (e.g., 1170, 1179, 1284, 1290)
+    // @2x phones have short side < 1080 (e.g., 640, 750)
+    if (shortSide >= 1080) {
+        return 3;
+    }
+
+    // Older @2x iPhones (iPhone 8, SE, etc.)
+    return 2;
 }
 
 /**

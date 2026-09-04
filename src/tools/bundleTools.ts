@@ -7,7 +7,6 @@ import {
     getBundleStatusWithErrors,
     getBundleErrors,
     checkMetroState,
-    parseErrorScreenText,
     bundleErrorBuffer,
     pushLogBox,
     dismissLogBox,
@@ -18,9 +17,7 @@ import {
     connectedApps,
     androidScreenshot,
     iosScreenshot,
-    inferIOSDevicePixelRatio,
-    recognizeText,
-    formatParsedError,
+    imageBuffer,
 } from "../core/index.js";
 
 export function registerBundleTools(server: McpServer): void {
@@ -326,7 +323,7 @@ export function registerBundleTools(server: McpServer): void {
                     content: [
                         {
                             type: "text",
-                            text: `Bundle Errors (0 captured):\n\nNo bundle errors captured.\n\nTip: If the app failed to load and you see a red error screen on the device, use the 'platform' parameter (ios/android) to enable screenshot+OCR fallback for error capture.${clearNote}`
+                            text: `Bundle Errors (0 captured):\n\nNo bundle errors captured.\n\nTip: If the app failed to load and you see a red error screen on the device, use the 'platform' parameter (ios/android) to enable screenshot fallback for error capture.${clearNote}`
                         }
                     ]
                 };
@@ -351,7 +348,8 @@ export function registerBundleTools(server: McpServer): void {
                 };
             }
     
-            // Metro is running but no apps connected - try screenshot fallback
+            // Metro is running but no apps connected — capture the screen so the
+            // agent can read a red-screen error visually via get_image_buffer.
             try {
                 let screenshotResult: {
                     success: boolean;
@@ -361,7 +359,7 @@ export function registerBundleTools(server: McpServer): void {
                     originalWidth?: number;
                     originalHeight?: number;
                 };
-    
+
                 if (platform === "harmony") {
                     const r = await resolveHarmonyTargetKey(deviceId);
                     if (!r.ok) return r.response;
@@ -375,7 +373,7 @@ export function registerBundleTools(server: McpServer): void {
                     if (!r.ok) return r.response;
                     screenshotResult = await iosScreenshot(undefined, r.udid);
                 }
-    
+
                 if (!screenshotResult.success || !screenshotResult.data) {
                     return {
                         content: [
@@ -386,53 +384,29 @@ export function registerBundleTools(server: McpServer): void {
                         ]
                     };
                 }
-    
-                // Calculate device pixel ratio for iOS
-                const devicePixelRatio =
-                    platform === "ios" && screenshotResult.originalWidth && screenshotResult.originalHeight
-                        ? inferIOSDevicePixelRatio(screenshotResult.originalWidth, screenshotResult.originalHeight)
-                        : 1;
-    
-                // Run OCR on the screenshot
-                const ocrResult = await recognizeText(screenshotResult.data, {
-                    scaleFactor: screenshotResult.scaleFactor || 1,
-                    platform,
-                    devicePixelRatio
-                });
-    
-                if (!ocrResult.success || !ocrResult.fullText) {
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `Bundle Errors (0 captured):\n\nNo bundle errors captured via CDP.\n\nMetro is running on port(s) ${metroState.metroPorts.join(", ")} but no apps are connected.\n\nScreenshot captured but OCR found no text. The screen may not show an error message.`
-                            }
-                        ]
-                    };
+
+                try {
+                    imageBuffer.add({
+                        id: `bundle-errors-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                        image: screenshotResult.data,
+                        timestamp: Date.now(),
+                        source: "get_bundle_errors",
+                        metadata: {
+                            width: screenshotResult.originalWidth || 0,
+                            height: screenshotResult.originalHeight || 0,
+                            scaleFactor: screenshotResult.scaleFactor || 1,
+                            platform,
+                        },
+                    });
+                } catch {
+                    // Non-fatal: image buffer write failure should not affect the response
                 }
-    
-                // Parse the OCR text for error information
-                const parsedError = parseErrorScreenText(ocrResult.fullText);
-    
-                if (!parsedError.found || !parsedError.error) {
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `Bundle Errors (0 captured):\n\nNo bundle errors captured via CDP.\n\nMetro is running on port(s) ${metroState.metroPorts.join(", ")} but no apps are connected.\n\nScreenshot OCR text:\n${ocrResult.fullText.substring(0, 1000)}${ocrResult.fullText.length > 1000 ? "..." : ""}\n\n(No error pattern detected in text)`
-                            }
-                        ]
-                    };
-                }
-    
-                // Add the parsed error to the buffer for future reference
-                bundleErrorBuffer.add(parsedError.error);
-    
+
                 return {
                     content: [
                         {
                             type: "text",
-                            text: `Bundle Errors (1 captured via screenshot fallback):\n\n${formatParsedError(parsedError)}`
+                            text: `Bundle Errors (0 captured):\n\nNo bundle errors captured via CDP.\n\nMetro is running on port(s) ${metroState.metroPorts.join(", ")} but no apps are connected (possible bundle error).\n\nA screenshot of the current screen was stored in the image buffer — call get_image_buffer to view it and read any error text visually.`
                         }
                     ]
                 };
