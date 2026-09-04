@@ -7,8 +7,6 @@ import { createServer as createHttpServer, type ServerResponse } from "node:http
 
 import { DECISION_TREE, UNTRUSTED_DATA_RULE } from "./core/guides.js";
 import { redactionEnabled, REDACTION_OFF_NOTE } from "./core/redact.js";
-import { identifyIfDevMode, shutdownPostHog } from "./core/posthog.js";
-import { getInstallationId, isDevMode, initTelemetry } from "./core/telemetry.js";
 import {
     connectedApps,
     cancelAllReconnectionTimers,
@@ -21,7 +19,6 @@ import { installToolRegistryInterceptor, toolRegistry } from "./core/register.js
 import { isPublishedBuild } from "./core/buildInfo.js";
 import { createSerialQueue } from "./core/serialQueue.js";
 
-import { registerAccountTools } from "./tools/accountTools.js";
 import { registerMetaTools } from "./tools/metaTools.js";
 import { registerReduxTools } from "./tools/reduxTools.js";
 import { registerExecutionTools } from "./tools/executionTools.js";
@@ -79,9 +76,7 @@ const server = new McpServer(
 
 installToolRegistryInterceptor(server);
 
-registerAccountTools(server);
 registerMetaTools(server, {
-    devMode: isDevMode(),
     httpMode: httpAllowed,
 });
 registerReduxTools(server);
@@ -118,17 +113,6 @@ function responseClosed(res: ServerResponse): Promise<void> {
 }
 
 async function main() {
-    initTelemetry();
-    identifyIfDevMode(getInstallationId());
-
-    // License validation is intentionally NOT pre-loaded here. It runs lazily on
-    // first real tool use (see ensureLicense() in trackToolInvocation), so that a
-    // bare MCP server boot that never invokes a tool does not hit the backend.
-    // This keeps Firebase reads/writes proportional to Active Sessions
-    // (session_start_ai_devtools) rather than Agent Sessions (session_start).
-    // Trade-off: the per-tool usage gate has no usage data on the very first tool
-    // call of a session and fails open for that single call — acceptable.
-
     if (httpRequested && !httpAllowed) {
         console.error(
             "[execbro] --http is a development transport (unauthenticated, exposes the `dev` meta-tool) " +
@@ -327,12 +311,7 @@ function gracefulShutdown() {
     disconnectMetroBuildEvents();
     clearAllConnectionState();
     clearAllCDPMessageTimes();
-    shutdownPostHog().catch(() => {});
 }
-
-process.on("beforeExit", () => {
-    shutdownPostHog().catch(() => {});
-});
 
 process.on("SIGINT", () => {
     gracefulShutdown();

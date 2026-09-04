@@ -1,52 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { getPostHogClient } from "./posthog.js";
-import {
-    getInstallationId,
-    getServerVersion,
-    getPackageName,
-    categorizeError,
-    trackToolInvocation,
-    isTelemetryEnabled,
-} from "./telemetry.js";
-import { getTargetPlatform } from "./state.js";
-import { resolveConnectedAppByDevice, peekTargetApp, dialogGateFor } from "./connection.js";
+import { peekTargetApp, dialogGateFor } from "./connection.js";
 import { nativeGate } from "./nativeCapabilities.js";
 import { chromiumGate } from "./chromiumCapabilities.js";
 import { recordToolCall } from "./screenStaleness.js";
 import { recordAction } from "./actionLog.js";
-import { EnvironmentError, UserInputError, type FailureKind } from "./errors.js";
-import { estimateImageTokens } from "./toolHelpers.js";
 import { containsCredential, redactSecrets, redactionEnabled, REDACTION_OFF_NOTE } from "./redact.js";
-import { connectedApps, shouldShowFeedbackHint, markFeedbackHintShown, pushLogBox } from "./index.js";
-import { ensureLicense, getUsageInfo } from "./license.js";
-import { freezeSessionVerdict, isToolBlocked, usageWarningLine } from "../pro/usageGate.js";
-import { maybeNotifyUsage, maybeNotifyDeferral } from "../pro/usageNotifications.js";
-
-/**
- * The platform this invocation actually acted on.
- *
- * `getTargetPlatform()` answers with the FIRST connected app, which is only the
- * right answer in a single-device session. With a simulator and an emulator
- * both attached, every event was stamped with whichever landed in the map
- * first: an input_text failure captured on 2026-08-10 carried
- * `target_platform=ios` while its own artifact bundle and screenshot were
- * unmistakably Android — so every platform breakdown on the dashboard is
- * wrong for multi-device sessions, not just this tool's.
- *
- * The tool's own `device` argument is the authority when it has one, and an
- * `ios_`/`android_` tool names its platform outright. Falls back to the old
- * behaviour when neither applies, which is also what the tool itself does.
- */
-function invocationPlatform(toolName: string, args: unknown): string | undefined {
-    if (toolName.startsWith("ios_")) return "ios";
-    if (toolName.startsWith("android_")) return "android";
-    const device = (args as { device?: unknown } | null)?.device;
-    if (typeof device === "string" && device.length > 0) {
-        const resolved = resolveConnectedAppByDevice(device);
-        if (resolved.kind === "ok") return resolved.app.platform;
-    }
-    return getTargetPlatform();
-}
+import { shouldShowFeedbackHint, markFeedbackHintShown, pushLogBox } from "./index.js";
 
 // Tools that do NOT require an active Metro connection — excluded from feedback hint trigger
 const NON_METRO_TOOLS = new Set([
@@ -55,9 +14,6 @@ const NON_METRO_TOOLS = new Set([
     "disconnect_metro",
     "ensure_connection",
     "get_connection_status",
-    "get_license_status",
-    "activate_license",
-    "delete_account",
     "get_usage_guide",
     "get_apps",
     "list_devices",
@@ -85,6 +41,11 @@ export function installToolRegistryInterceptor(server: McpServer): void {
     };
 }
 
+// The name is historical: this wrapper no longer reports telemetry. It now only
+// keeps the per-invocation side effects that are product behaviour — capability
+// gating, secret redaction, screen staleness attribution, the first-install
+// feedback hint and the local action log that get_timeline reads — and
+// propagates handler results/exceptions unchanged.
 export function registerToolWithTelemetry(
     server: McpServer,
     toolName: string,
@@ -92,72 +53,27 @@ export function registerToolWithTelemetry(
     handler: (args: any) => Promise<any>,
     emptyResultDetector?: (result: any) => boolean,
 ): void {
+    void emptyResultDetector;
     toolRegistry.set(toolName, { config, handler });
     server.registerTool(toolName, config, async (args: any) => {
-        // Resolve + freeze the session verdict once (session-start semantics),
-        // then gate. Cap logic lives in src/pro/ (commercial); this MIT wrapper
-        // only calls into it.
-        await ensureLicense();
-        freezeSessionVerdict(getUsageInfo());
-        const usageNow = getUsageInfo();
-        // Pass the caller's device through: with a single app connected an
-        // undefined device already resolves to it, but with several connected
-        // it resolves to "ambiguous" and the banner is silently dropped.
-        void maybeNotifyDeferral(usageNow, args?.device);
-        void maybeNotifyUsage(usageNow, args?.device);
-        const gate = isToolBlocked(toolName);
-        if (gate.blocked) {
-            return { content: [{ type: "text" as const, text: gate.message! }] };
-        }
         const startTime = Date.now();
         let success = true;
         let errorMessage: string | undefined;
-        let errorContext: string | undefined;
-        let failureKind: FailureKind | undefined;
-        // Which of the two failure paths ran. Both set success=false and share the
-        // trackToolInvocation call below, so without this the dashboard cannot tell
-        // a handled { isError: true } return from a real thrown exception — and only
-        // the latter produces a stack trace or reaches captureException.
-        let errorOrigin: "thrown" | "returned" | undefined;
-        let inputTokens: number | undefined;
-        let outputTokens: number | undefined;
-        let emptyResult: boolean | undefined;
         let meaningful: boolean | undefined;
-        let changeRate: number | undefined;
-        let tapStrategy: string | undefined;
-        let iosDriver: string | undefined;
-        let responsePreview: string | undefined;
-        let emptyReason: string | undefined;
-        let artifactKey: string | undefined;
-        let ocrClosestMatch: string | undefined;
-        let fiberPressableCount: string | undefined;
-        let accessibilityMatchCount: string | undefined;
-        let appRoute: string | undefined;
-        // Set by cross-platform tools that resolve their own target (e.g. `screenshot` on a
-        // simulator with no app connected), where invocationPlatform has nothing to read.
-        let resolvedPlatform: string | undefined;
-
         try {
-            inputTokens = Math.ceil(JSON.stringify(args).length / 4);
-        } catch {
-            /* circular refs — leave undefined */
-        }
-
-        try {
-            // Chromium capability gate. Inside the try so a refusal is recorded
-            // in telemetry as a returned failure: that count is how we learn
-            // which unsupported tool agents reach for first on desktop.
+            // Capability gates, checked in order: what a chromium target
+            // supports, what a native Android app supports, and whether a
+            // JavaScript dialog is holding the app open. The first that applies
+            // returns a refusal instead of the handler's result. Inside the try
+            // so a refusal flows through the same redaction and action-log
+            // paths as any other result.
             const target = peekTargetApp(toolName, args?.device);
-            // Native apps report their own platform value, so dashboards can split them from React Native on Android.
-            if (target?.runtime === "native") resolvedPlatform = "android-native";
             const result = chromiumGate(toolName, target?.platform)
                 ?? nativeGate(toolName, target?.runtime)
                 ?? dialogGateFor(toolName, args?.device)
                 ?? await handler(args);
             // Secret redaction, applied once for every tool rather than at each
-            // render site. Runs before anything else reads the text, so the
-            // token accounting and the dev-mode JSONL on disk both see the
-            // redacted string.
+            // render site. Runs before anything else reads the text.
             //
             // There is deliberately no per-call escape. `verbose:true` used to
             // lift this, which put the hatch in the hands of the model — the
@@ -182,72 +98,13 @@ export function registerToolWithTelemetry(
                 // the agent just needs to know before it quotes a token.
                 result.content.push({ type: "text", text: REDACTION_OFF_NOTE });
             }
-            // Check if result indicates an error
+            // Tap verification reports whether the screen actually changed;
+            // the local action log records it for get_timeline.
+            if (result?._meaningful !== undefined) meaningful = result._meaningful;
+            // A returned (handled) failure: capture the reason for the timeline.
             if (result?.isError) {
                 success = false;
-                errorOrigin = "returned";
-                // Prefer concise _errorMessage over full response text (which may be large JSON)
                 errorMessage = result._errorMessage || result.content?.[0]?.text || "Unknown error";
-            }
-            // Always propagate _errorContext when the tool provides it (e.g. tap predicate
-            // for unmeaningful outcomes where isError is false but we still want triage context).
-            if (result?._errorContext) {
-                errorContext = result._errorContext;
-            }
-            // Structured cause, when the tool knows it. Independent of
-            // _errorContext because that field is not reliably a closed set.
-            if (result?._failureKind) {
-                failureKind = result._failureKind;
-            }
-            // Check for empty result (only on success). A tool that reports
-            // `_emptyResult` wins over the detector: the detector can only see
-            // global state, while the handler knows what it actually returned
-            // to the caller. Mixing the two produced both false empties (SDK
-            // path served logs while the CDP buffer was empty) and false
-            // non-empties (device/level filter matched nothing while another
-            // buffer held logs), which made the empty rate unreadable.
-            if (success) {
-                if (typeof result?._emptyResult === "boolean") {
-                    emptyResult = result._emptyResult;
-                } else if (emptyResultDetector) {
-                    try {
-                        emptyResult = emptyResultDetector(result);
-                    } catch {
-                        // Detector failure should never affect tool execution
-                    }
-                }
-            }
-            // Extract meaningfulness data if provided (tap tool verification)
-            if (result?._meaningful !== undefined) meaningful = result._meaningful;
-            if (result?._changeRate !== undefined) changeRate = result._changeRate;
-            if (result?._tapStrategy) tapStrategy = result._tapStrategy;
-            if (result?._iosDriver) iosDriver = result._iosDriver;
-            if (result?._emptyReason) emptyReason = result._emptyReason;
-            if (result?._artifactKey) artifactKey = result._artifactKey;
-            if (result?._ocrClosestMatch) ocrClosestMatch = result._ocrClosestMatch;
-            if (result?._fiberPressableCount) fiberPressableCount = result._fiberPressableCount;
-            if (result?._accessibilityMatchCount) accessibilityMatchCount = result._accessibilityMatchCount;
-            if (result?._appRoute) appRoute = result._appRoute;
-            if (result?._targetPlatform) resolvedPlatform = result._targetPlatform;
-            if (Array.isArray(result?.content)) {
-                let totalTokens = 0;
-                for (const item of result.content) {
-                    if (item.type === "text" && typeof item.text === "string") {
-                        totalTokens += Math.ceil(item.text.length / 4);
-                    } else if (item.type === "image" && typeof item.data === "string") {
-                        totalTokens += estimateImageTokens(item.data);
-                    }
-                }
-                if (totalTokens > 0) outputTokens = totalTokens;
-            }
-            // Capture response text preview for local dev dashboard
-            if (Array.isArray(result?.content)) {
-                const textParts = result.content
-                    .filter((item: { type: string }) => item.type === "text")
-                    .map((item: { text: string }) => item.text);
-                if (textParts.length > 0) {
-                    responsePreview = textParts.join("\n").substring(0, 2000);
-                }
             }
             // First-install feedback hint — fires once on first successful Metro-connected tool
             if (!NON_METRO_TOOLS.has(toolName) && shouldShowFeedbackHint()) {
@@ -262,105 +119,24 @@ export function registerToolWithTelemetry(
                     // Non-fatal — hint delivery failure should not affect tool execution
                 });
             }
-            const warn = usageWarningLine(getUsageInfo());
-            if (warn && Array.isArray(result?.content)) {
-                result.content.push({ type: "text" as const, text: warn });
-            }
             return result;
         } catch (error) {
             success = false;
-            errorOrigin = "thrown";
             errorMessage = error instanceof Error ? error.message : String(error);
-            // Thrown validation errors can carry a triage tag; without this the
-            // error-context column is empty for every throwing tool path.
-            if (error instanceof UserInputError && error.context) {
-                errorContext = error.context;
-            }
-            if (error instanceof EnvironmentError) {
-                failureKind = error.kind;
-            } else if (error instanceof UserInputError && error.kind) {
-                failureKind = error.kind;
-            }
-            // H2 (Step 9): UserInputError marks agent-input mistakes (unknown
-            // device, missing predicate, ambiguous match). They flow through
-            // telemetry's trackToolInvocation in the finally block; we just
-            // skip the dedicated error-tracking pipe so the dashboard surfaces
-            // real product bugs rather than validation noise.
-            if (!(error instanceof UserInputError) && isTelemetryEnabled()) {
-                getPostHogClient()?.captureException(error, getInstallationId(), { tool: toolName, server_version: getServerVersion(), package_name: getPackageName() });
-            }
             throw error;
         } finally {
-            const duration = Date.now() - startTime;
-            // Both of these reach remote telemetry without passing through the
-            // content redaction above. errorMessage: a failing request often
-            // carries its URL, query string included. errorContext: tools set
-            // it to their own raw input. One guard covers every path that sets
-            // either. The thrown error itself is re-thrown unmodified \u2014 the
-            // MCP client renders it, and rewriting an in-flight exception is a
-            // bigger change than this exposure warrants.
-            if (redactionEnabled()) {
-                // catalog:false — these two go to telemetry, and a catalog
-                // footer there is noise in an error string rather than context
-                // for an agent reading a tool result.
-                if (errorMessage) errorMessage = redactSecrets(errorMessage, { catalog: false });
-                // errorContext carries the raw tool input on failure —
-                // execute_in_app sets it to the expression verbatim — and it
-                // reaches PostHog as error_context (telemetry.ts:622) and the
-                // local JSONL. It never passes through the content redaction
-                // above, because it is not content.
-                if (errorContext) errorContext = redactSecrets(errorContext, { catalog: false });
-            }
-            // Attribute the NEXT tool's screen changes. Recorded here, in
-            // `finally`, so that while a handler runs this still names the
-            // PREVIOUS tool — which is what screenStaleness needs to tell
-            // "the agent moved the screen" from "someone else did".
+            // Attribute the NEXT tool's screen changes. Recorded in `finally` so
+            // that while a handler runs this still names the PREVIOUS tool —
+            // which is what screenStaleness needs to tell "the agent moved the
+            // screen" from "someone else did".
             recordToolCall(toolName);
-            // After redaction above, so a failure reason carries no credential.
-            // Synchronous and self-guarded: the timeline must never cost a call.
+            // Local action log for get_timeline. After the redaction above, so a
+            // failure reason carries no credential. Synchronous and
+            // self-guarded: the timeline must never cost a call.
+            if (errorMessage && redactionEnabled()) {
+                errorMessage = redactSecrets(errorMessage, { catalog: false });
+            }
             recordAction({ tool: toolName, args, startedAt: startTime, endedAt: Date.now(), ok: success, error: errorMessage, meaningful });
-            const targetPlatform = resolvedPlatform ?? invocationPlatform(toolName, args);
-            trackToolInvocation(toolName, success, duration, errorMessage, errorContext, inputTokens, outputTokens, targetPlatform, emptyResult, meaningful, changeRate, tapStrategy, iosDriver, responsePreview, emptyReason, artifactKey, ocrClosestMatch, fiberPressableCount, accessibilityMatchCount, appRoute, errorOrigin, failureKind);
-            // Classify this invocation's platform kind so PostHog breakdowns can split RN vs Native.
-            // RN: any connected app has appDetection. Native: tool name prefixed ios_/android_. Else: null.
-            let platformKind: "rn" | "native" | null = null;
-            for (const app of connectedApps.values()) {
-                if (app.appDetection) { platformKind = "rn"; break; }
-            }
-            if (!platformKind) {
-                if (toolName.startsWith("ios_") || toolName.startsWith("android_")) platformKind = "native";
-            }
-
-            // Analytics only — gated on the same flag as the tool_invocation
-            // mirror in telemetry.ts. Leaving it ungated made opted-out installs
-            // emit per-tool events with no tool_invocation/app_detected
-            // counterpart, which read as "users who never connected an app".
-            // Guarded with an if, never an early return: a `return` inside
-            // `finally` discards the exception the catch block re-threw.
-            if (isTelemetryEnabled()) {
-                getPostHogClient()?.capture({
-                    distinctId: getInstallationId(),
-                    event: toolName,
-                    properties: {
-                        success,
-                        duration,
-                        server_version: getServerVersion(),
-                        package_name: getPackageName(),
-                        ...(errorMessage && { error: errorMessage.substring(0, 200) }),
-                        ...(errorMessage && { error_category: categorizeError(errorMessage, errorContext) }),
-                        ...(failureKind && { failure_kind: failureKind }),
-                        ...(errorOrigin && { error_origin: errorOrigin }),
-                        ...(targetPlatform && { platform: targetPlatform }),
-                        ...(platformKind && { platform_kind: platformKind }),
-                        ...(tapStrategy && { tap_strategy: tapStrategy }),
-                        ...(meaningful !== undefined && { meaningful }),
-                        ...(changeRate !== undefined && { change_rate: changeRate }),
-                        ...(iosDriver && { ios_driver: iosDriver }),
-                        ...(emptyResult !== undefined && { empty_result: emptyResult }),
-                        ...(emptyReason && { empty_reason: emptyReason }),
-                    },
-                });
-            }
         }
     });
 }

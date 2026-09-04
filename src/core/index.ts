@@ -284,24 +284,6 @@ export {
 // Element Inspector selection types — still used by componentSource.ts
 export type { SelectionEntry, SelectionFrame, ComponentStack } from "./selectionBuffer.js";
 
-// License & Usage
-export {
-  ensureLicense,
-  getLicenseStatus,
-  getUsageInfo,
-  getPricingInfo,
-  formatPlanPrice,
-  incrementLocalUsage,
-} from "./license.js";
-export type { LicenseTier, LicenseStatus, UsageInfo, PricingInfo, PlanPricing } from "./license.js";
-
-// Telemetry
-export {
-  initTelemetry,
-  isTelemetryEnabled,
-  trackToolInvocation,
-} from "./telemetry.js";
-
 // LogBox detection & dismissal
 export {
   detectLogBox,

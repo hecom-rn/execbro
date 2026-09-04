@@ -1,6 +1,5 @@
 import WebSocket from "ws";
 import { getNextMessageId } from "./state.js";
-import { trackAppDetection } from "./telemetry.js";
 import type { AppDetectionResult, ConnectedApp, DevicePlatform } from "./types.js";
 
 const DETECTION_TIMEOUT_MS = 3000;
@@ -131,7 +130,6 @@ export function scheduleAppDetection(app: ConnectedApp): void {
     if (!app.appDetection) {
         const presumptive = inferPresumptiveDetection(app, platform);
         app.appDetection = presumptive;
-        trackAppDetection(presumptive);
     }
 
     app.appDetectionPromise = new Promise<void>((resolve) => {
@@ -198,7 +196,6 @@ export function scheduleAppDetection(app: ConnectedApp): void {
                                 })
                                 .catch(() => {});
                         }
-                        trackAppDetection(parsed);
                         const versionStr = parsed.reactNativeVersion !== "unknown"
                             ? `RN ${parsed.reactNativeVersion}, ` : "";
                         console.error(
