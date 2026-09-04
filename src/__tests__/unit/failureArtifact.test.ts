@@ -20,22 +20,10 @@ describe("isArtifactCaptureEnabled", () => {
         process.env = { ...ORIGINAL };
     });
 
-    it("returns true by default", () => {
-        expect(isArtifactCaptureEnabled()).toBe(true);
-    });
-
-    it("returns false when RN_AI_DEVTOOLS_DISABLE_FAILURE_ARTIFACTS=1", () => {
-        process.env.RN_AI_DEVTOOLS_DISABLE_FAILURE_ARTIFACTS = "1";
+    it("is hard-disabled: returns false regardless of env", () => {
         expect(isArtifactCaptureEnabled()).toBe(false);
-    });
-
-    it("returns false when RN_AI_DEVTOOLS_DISABLE_FAILURE_ARTIFACTS=true", () => {
-        process.env.RN_AI_DEVTOOLS_DISABLE_FAILURE_ARTIFACTS = "true";
-        expect(isArtifactCaptureEnabled()).toBe(false);
-    });
-
-    it("returns false when telemetry is disabled (RN_DEBUGGER_TELEMETRY=false)", () => {
-        process.env.RN_DEBUGGER_TELEMETRY = "false";
+        process.env.RN_AI_DEVTOOLS_DISABLE_FAILURE_ARTIFACTS = "0";
+        process.env.RN_DEBUGGER_TELEMETRY = "true";
         expect(isArtifactCaptureEnabled()).toBe(false);
     });
 });
@@ -210,19 +198,12 @@ describe("captureFailureArtifact", () => {
         ...overrides
     });
 
-    it("returns artifactKey and structured signals when enabled", async () => {
-        const out = await captureFailureArtifact(baseInput());
-        expect(out.artifactKey).toMatch(/^\d{4}-\d{2}-\d{2}\/[0-9a-f-]{36}$/);
-        expect(out.signals.fiberPressableCount).toBe("2");
-        expect(out.signals.accessibilityMatchCount).toBe("1");
-        expect(out.signals.nearbyPressables).toEqual([{ label: "Login", testID: undefined }, { label: "Forgot", testID: undefined }]);
-    });
-
-    it("returns empty artifactKey but still computes signals when disabled", async () => {
-        process.env.RN_AI_DEVTOOLS_DISABLE_FAILURE_ARTIFACTS = "1";
+    it("capture is hard-disabled: always returns an empty artifactKey with computed signals", async () => {
         const out = await captureFailureArtifact(baseInput());
         expect(out.artifactKey).toBe("");
         expect(out.signals.fiberPressableCount).toBe("2");
+        expect(out.signals.accessibilityMatchCount).toBe("1");
+        expect(out.signals.nearbyPressables).toEqual([{ label: "Login", testID: undefined }, { label: "Forgot", testID: undefined }]);
     });
 });
 
