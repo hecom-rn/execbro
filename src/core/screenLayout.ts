@@ -582,7 +582,7 @@ export async function getScreenLayout(
 
     // Retry once on the early-startup race where the React DevTools hook
     // isn't registered yet. Production / non-__DEV__ builds will still fail
-    // after the retry — surface an actionable error pointing at OCR/screenshot.
+    // after the retry — surface an actionable error pointing at screenshot tools.
     if (dispatchError && /React DevTools hook not found/.test(dispatchError)) {
         await delay(400);
         dispatchResult = await executeInApp(dispatchExpression, false, { timeoutMs: timeoutMs ?? 30000, originatingToolName: "get_screen_layout" }, device);

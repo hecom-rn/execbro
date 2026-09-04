@@ -70,10 +70,9 @@ export async function captureInputArtifact(ctx: InputArtifactContext): Promise<C
             sessionId: "",
             version: getServerVersion(),
             senses: {
-                // input_text resolves through fiber only — it never runs OCR or
-                // reads the accessibility tree, and claiming otherwise would
-                // make the dashboard's "fiber / a11y" column lie.
-                ocr: { ran: false, durationMs: 0, detections: [], closestMatch: null },
+                // input_text resolves through fiber only — it never reads the
+                // accessibility tree, and claiming otherwise would make the
+                // dashboard's "fiber / a11y" column lie.
                 fiber: {
                     ran: true,
                     durationMs: 0,

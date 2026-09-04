@@ -302,21 +302,6 @@ export {
   trackToolInvocation,
 } from "./telemetry.js";
 
-// OCR
-export {
-  recognizeText,
-  terminateOCRWorker,
-  inferIOSDevicePixelRatio,
-} from "./ocr.js";
-export type { OCRResult, OCRWord, OCRLine, OCROptions } from "./ocr.js";
-
-// Error Screen Parser (OCR-based bundle error fallback)
-export {
-  parseErrorScreenText,
-  formatParsedError,
-} from "./errorScreenParser.js";
-export type { ParsedErrorScreen } from "./errorScreenParser.js";
-
 // LogBox detection & dismissal
 export {
   detectLogBox,

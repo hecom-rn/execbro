@@ -51,9 +51,8 @@ describe("buildArtifactBundle", () => {
             outcome: "failure",
             errorCategory: "validation",
             errorMessage: 'No element found matching text="Sign in"',
-            strategyChain: "accessibility:no match|fiber:no pressable|ocr:not found",
+            strategyChain: "accessibility:no match|fiber:no pressable",
             senses: {
-                ocr: { ran: true, durationMs: 1820, detections: [{ text: "Login", bbox: [10, 20, 100, 50], conf: 0.93 }], closestMatch: { text: "Login", score: 0.61 } },
                 fiber: { ran: true, durationMs: 0, metroConnected: true, pressables: [] },
                 accessibility: { ran: true, durationMs: 240, elements: [] }
             },
@@ -65,7 +64,6 @@ describe("buildArtifactBundle", () => {
         expect(bundle.artifactId).toBe("00000000-0000-0000-0000-000000000001");
         expect(bundle.outcome).toBe("failure");
         expect(bundle.predicate).toEqual({ text: "Sign in" });
-        expect(bundle.senses.ocr.closestMatch).toEqual({ text: "Login", score: 0.61 });
         expect(bundle.senses.fiber.metroConnected).toBe(true);
         expect(bundle.deviceMeta.platform).toBe("ios");
     });
@@ -108,7 +106,6 @@ describe("gzipBundle", () => {
             predicate: {},
             outcome: "failure" as const,
             senses: {
-                ocr: { ran: false, durationMs: 0, detections: [], closestMatch: null },
                 fiber: { ran: false, durationMs: 0, metroConnected: false, pressables: [] },
                 accessibility: { ran: false, durationMs: 0, elements: [] }
             },
@@ -203,7 +200,6 @@ describe("captureFailureArtifact", () => {
         sessionId: "abc",
         version: "1.7.0",
         senses: {
-            ocr: { ran: true, durationMs: 1, detections: [{ text: "Login", bbox: [0, 0, 1, 1], conf: 0.9 }], closestMatch: { text: "Login", score: 0.61 } },
             fiber: { ran: true, durationMs: 0, metroConnected: true, pressables: [{ label: "Login" }, { label: "Forgot" }] },
             accessibility: { ran: true, durationMs: 1, elements: [{ label: "Login button" }] }
         },
@@ -217,7 +213,6 @@ describe("captureFailureArtifact", () => {
     it("returns artifactKey and structured signals when enabled", async () => {
         const out = await captureFailureArtifact(baseInput());
         expect(out.artifactKey).toMatch(/^\d{4}-\d{2}-\d{2}\/[0-9a-f-]{36}$/);
-        expect(out.signals.ocrClosestMatch).toBe("Login@0.61");
         expect(out.signals.fiberPressableCount).toBe("2");
         expect(out.signals.accessibilityMatchCount).toBe("1");
         expect(out.signals.nearbyPressables).toEqual([{ label: "Login", testID: undefined }, { label: "Forgot", testID: undefined }]);
@@ -228,7 +223,6 @@ describe("captureFailureArtifact", () => {
         const out = await captureFailureArtifact(baseInput());
         expect(out.artifactKey).toBe("");
         expect(out.signals.fiberPressableCount).toBe("2");
-        expect(out.signals.ocrClosestMatch).toBe("Login@0.61");
     });
 });
 

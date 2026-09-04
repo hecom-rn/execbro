@@ -56,7 +56,7 @@ const NON_TOOL_TOKENS = new Set([
     "for", "via", "the", "its", "has", "all", "any", "ids", "file",
     // Schema / MCP things
     "isolated_vm", "isolated", "vm", "hermes", "jsc", "metro", "rn",
-    "ios", "android", "cdp", "sdk", "ui", "ocr",
+    "ios", "android", "cdp", "sdk", "ui",
     // Verb-ish tokens used before "(" in English prose
     "returns", "includes", "uses", "uses_", "works", "tries", "prefers",
     "matches", "triggers", "scans", "parses", "reads", "writes", "sends",

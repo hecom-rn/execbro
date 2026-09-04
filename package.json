@@ -75,8 +75,5 @@
         "nodemon": "^3.1.11",
         "ts-jest": "^29.4.6",
         "typescript": "^5.9.3"
-    },
-    "optionalDependencies": {
-        "node-easyocr": "^1.0.9"
     }
 }

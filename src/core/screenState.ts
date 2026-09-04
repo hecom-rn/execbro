@@ -1672,7 +1672,7 @@ export async function getScreenState(
 
     // Native-presented sheets (e.g. True Sheet) render their content into a detached native
     // context whose measureInWindow data is unreliable. Collect open-sheet host markers so
-    // the resolve pass can flag a nativeOverlay and steer the agent to screenshot/OCR.
+    // the resolve pass can flag a nativeOverlay and steer the agent to screenshot.
     var __nativeSheetMarkers = [];
     var __NATIVE_SHEET_RE = /^(${NATIVE_SHEET_MARKER_RE_SRC})$/;
     (function scanNative(fiber, depth) {
@@ -2479,7 +2479,7 @@ ${OVERLAY_ADOPTION_JS}
 
     // Native-presented sheet detection: when an open native sheet covers the screen, its
     // (and the underlying screen's) coordinates are unreliable — flag it and mark the
-    // underlying pressables blocked so agents fall back to screenshot/OCR.
+    // underlying pressables blocked so agents fall back to screenshots.
     try {
         const parsedRaw = JSON.parse(resolveResult.result || "{}");
         const markers: string[] = Array.isArray(parsedRaw.nativeMarkers) ? parsedRaw.nativeMarkers : [];
