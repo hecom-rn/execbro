@@ -3,19 +3,13 @@ import { randomUUID } from "node:crypto";
 import { getTelemetryApiKey, getTelemetryEndpoint } from "./telemetry.js";
 import type { DevicePlatform } from "../core/types.js";
 
-const TRUTHY_DISABLE = new Set(["1", "true", "yes", "on"]);
-const FALSY_TELEMETRY = new Set(["0", "false", "no", "off"]);
 const UPLOAD_TIMEOUT_MS = 5000;
 
+// Hard-disabled product-wide: a failure artifact uploads the app bundle plus
+// before/after screenshots to the telemetry worker. Capture, gzip, and upload
+// code is kept intact so re-enabling is a one-line revert of this `return`.
 export function isArtifactCaptureEnabled(): boolean {
-    const explicitDisable =
-        process.env.EXECBRO_DISABLE_FAILURE_ARTIFACTS ?? process.env.RN_AI_DEVTOOLS_DISABLE_FAILURE_ARTIFACTS;
-    if (explicitDisable && TRUTHY_DISABLE.has(explicitDisable.toLowerCase())) return false;
-
-    const telemetryFlag = process.env.EXECBRO_TELEMETRY ?? process.env.RN_DEBUGGER_TELEMETRY;
-    if (telemetryFlag && FALSY_TELEMETRY.has(telemetryFlag.toLowerCase())) return false;
-
-    return true;
+    return false;
 }
 
 export type ArtifactOutcome = "failure" | "unmeaningful";
