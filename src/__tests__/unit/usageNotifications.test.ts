@@ -50,7 +50,15 @@ describe("maybeNotifyUsage — 100% cap banner fires once per session", () => {
         pushLogBoxMock.mockClear();
         // Fresh module instance per test = fresh in-memory sessionCapNotified,
         // i.e. simulates a new process/session each time.
+        const actualConnection = await import("../../core/connection.js");
         jest.resetModules();
+        // maybeNotifyUsage bails before pushing when no app is connected, and the
+        // real connection registry is empty under test. These cases are about the
+        // dedup logic, so give them a connected app.
+        jest.unstable_mockModule("../../core/connection.js", () => ({
+            ...actualConnection,
+            hasConnectedApp: () => true
+        }));
         const actualFs = await import("fs");
         jest.unstable_mockModule("fs", () => ({
             ...actualFs,
@@ -72,5 +80,116 @@ describe("maybeNotifyUsage — 100% cap banner fires once per session", () => {
         await maybeNotifyUsage(usage({ monthKey: "2026-08", used: 600 }));
         await maybeNotifyUsage(usage({ monthKey: "2026-08", used: 600 }));
         expect(pushLogBoxMock).toHaveBeenCalledTimes(1);
+    });
+});
+
+// The whole point of the cap_notified event is that an undelivered banner is
+// distinguishable from an unsent one: a zero conversion rate is unreadable if
+// "nobody paid" cannot be told apart from "nobody was ever shown a paywall".
+// See docs/devtools-core/specs/2026-09-06-cap-notification-instrumentation-design.md.
+describe("maybeNotifyUsage — reports notification delivery", () => {
+    const pushLogBoxMock = jest.fn<(...args: unknown[]) => Promise<boolean>>();
+    const lastErrorMock = jest.fn<() => string | null>();
+    const hasConnectedAppMock = jest.fn<() => boolean>();
+    const trackCapNotificationMock = jest.fn<(...args: unknown[]) => void>();
+
+    let maybeNotifyUsage: typeof import("../../pro/usageNotifications.js").maybeNotifyUsage;
+
+    beforeEach(async () => {
+        pushLogBoxMock.mockReset();
+        lastErrorMock.mockReset();
+        hasConnectedAppMock.mockReset().mockReturnValue(true);
+        trackCapNotificationMock.mockReset();
+        // Spread the real modules: other importers in this graph need their
+        // remaining exports, so only the functions under test are replaced.
+        const actualTelemetry = await import("../../core/telemetry.js");
+        const actualConnection = await import("../../core/connection.js");
+        jest.resetModules();
+        jest.unstable_mockModule("../../core/telemetry.js", () => ({
+            ...actualTelemetry,
+            trackCapNotification: trackCapNotificationMock
+        }));
+        jest.unstable_mockModule("../../core/connection.js", () => ({
+            ...actualConnection,
+            hasConnectedApp: hasConnectedAppMock
+        }));
+        // Registered here, not at describe scope: a module-scope registration
+        // would clobber the mock the previous describe relies on.
+        jest.unstable_mockModule("../../core/logbox.js", () => ({
+            pushLogBox: pushLogBoxMock,
+            getLastLogBoxError: lastErrorMock,
+            detectLogBox: jest.fn(),
+            dismissLogBox: jest.fn(),
+            addLogBoxIgnorePatterns: jest.fn(),
+            formatLogBoxWarning: jest.fn(),
+            formatDismissedEntries: jest.fn(),
+            notifyDriverMissing: jest.fn()
+        }));
+        const actualFs = await import("fs");
+        jest.unstable_mockModule("fs", () => ({
+            ...actualFs,
+            existsSync: () => false,
+            readFileSync: () => "{}",
+            writeFileSync: jest.fn(),
+            mkdirSync: jest.fn()
+        }));
+        ({ maybeNotifyUsage } = await import("../../pro/usageNotifications.js"));
+    });
+
+    test("delivered banner reports success", async () => {
+        pushLogBoxMock.mockResolvedValue(true);
+        await maybeNotifyUsage(usage({ used: 600 }));
+        expect(trackCapNotificationMock).toHaveBeenCalledWith("100", true, "logbox");
+    });
+
+    test("failed push with an app connected reports the LogBox reason", async () => {
+        pushLogBoxMock.mockResolvedValue(false);
+        lastErrorMock.mockReturnValue("execute_failed");
+        await maybeNotifyUsage(usage({ used: 600 }));
+        expect(trackCapNotificationMock).toHaveBeenCalledWith("100", false, "execute_failed");
+    });
+
+    // With no app connected there is no channel to render on, and a user whose
+    // app is not running cannot act on a cap warning anyway. Pushing anyway would
+    // spend the 80% warning's monthly allowance (and the grandfather notice's
+    // once-per-window allowance) on a moment nobody could see.
+    test("no app connected: nothing is pushed, and the deferral is reported", async () => {
+        hasConnectedAppMock.mockReturnValue(false);
+        await maybeNotifyUsage(usage({ used: 600 }));
+        expect(pushLogBoxMock).not.toHaveBeenCalled();
+        expect(trackCapNotificationMock).toHaveBeenCalledWith("100", false, "deferred_no_app");
+    });
+
+    test("no app connected: the deferral is reported once per session, not per call", async () => {
+        hasConnectedAppMock.mockReturnValue(false);
+        await maybeNotifyUsage(usage({ used: 600 }));
+        await maybeNotifyUsage(usage({ used: 600 }));
+        await maybeNotifyUsage(usage({ used: 600 }));
+        expect(trackCapNotificationMock).toHaveBeenCalledTimes(1);
+    });
+
+    // The whole point of bailing early: the monthly dedup must not be spent.
+    test("no app connected: the 80% warning is still owed once an app appears", async () => {
+        hasConnectedAppMock.mockReturnValue(false);
+        await maybeNotifyUsage(usage({ used: 480 }));
+        expect(pushLogBoxMock).not.toHaveBeenCalled();
+
+        hasConnectedAppMock.mockReturnValue(true);
+        pushLogBoxMock.mockResolvedValue(true);
+        await maybeNotifyUsage(usage({ used: 480 }));
+        expect(pushLogBoxMock).toHaveBeenCalledTimes(1);
+        expect(trackCapNotificationMock).toHaveBeenCalledWith("80", true, "logbox");
+    });
+
+    test("a throwing push is reported rather than swallowed", async () => {
+        pushLogBoxMock.mockRejectedValue(new Error("boom"));
+        await expect(maybeNotifyUsage(usage({ used: 600 }))).resolves.toBeUndefined();
+        expect(trackCapNotificationMock).toHaveBeenCalledWith("100", false, "threw");
+    });
+
+    test("the 80% warning is reported under its own threshold", async () => {
+        pushLogBoxMock.mockResolvedValue(true);
+        await maybeNotifyUsage(usage({ used: 480 }));
+        expect(trackCapNotificationMock).toHaveBeenCalledWith("80", true, "logbox");
     });
 });

@@ -1,6 +1,8 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
-import { pushLogBox } from "../core/logbox.js";
+import { pushLogBox, getLastLogBoxError } from "../core/logbox.js";
+import { hasConnectedApp } from "../core/connection.js";
+import { trackCapNotification } from "../core/telemetry.js";
 import { CONFIG_DIR } from "../core/paths.js";
 import { getPricingInfo, formatPlanPrice, type UsageInfo } from "../core/license.js";
 import { API_BASE_URL } from "../core/config.js";
@@ -68,6 +70,24 @@ export function nextThreshold(usage: UsageInfo | null): 80 | 100 | null {
 // where it already fired in an earlier session.
 let sessionCapNotified = false;
 
+// Deferral telemetry is per process, so a blocked user whose app is not running
+// does not emit one event per tool call for the rest of the session.
+let sessionDeferredNotify = false;
+let sessionDeferredGrandfather = false;
+
+// The banner renders through executeInApp, so with no app connected there is no
+// channel at all — and a user whose app is not running cannot act on a cap
+// warning anyway. Bail BEFORE any dedup state is written, so the notification is
+// still owed once they start their app.
+//
+// This matters unevenly. The 100% banner re-fires every session (sessionCapNotified),
+// so a lost push there costs nothing permanent. The 80% warning is monthly-only
+// and the grandfather notice fires once per enforcement window, so for those two
+// a push into the void is the whole allowance.
+function noAppToNotifyOn(): boolean {
+    return !hasConnectedApp();
+}
+
 // Fire the LogBox banner at most once per threshold per month — except the 100%
 // (blocked) banner, which additionally fires once per new session (see above).
 export async function maybeNotifyUsage(usage: UsageInfo | null, device?: string): Promise<void> {
@@ -83,6 +103,13 @@ export async function maybeNotifyUsage(usage: UsageInfo | null, device?: string)
             state.lastThreshold === threshold || (state.lastThreshold === 100 && threshold === 80);
         const sessionNeedsCapBanner = threshold === 100 && !sessionCapNotified;
         if (alreadyNotifiedThisMonth && !sessionNeedsCapBanner) return;
+        if (noAppToNotifyOn()) {
+            if (!sessionDeferredNotify) {
+                sessionDeferredNotify = true;
+                trackCapNotification(threshold === 100 ? "100" : "80", false, "deferred_no_app");
+            }
+            return;
+        }
         if (threshold === 100) sessionCapNotified = true;
 
         const askAgent = `Ask your AI assistant: "Check my ExecBro license status and help me link my account and upgrade to Pro."`;
@@ -108,8 +135,20 @@ export async function maybeNotifyUsage(usage: UsageInfo | null, device?: string)
         // expanded=false is stored but never visually shown unless LogBox is already open —
         // this notification exists to be seen, so we force the full-screen view open instead
         // of reaching for level="error", which would look like the app itself broke.
-        await pushLogBox(msg, "warning", true, "logbox", "ExecBro", device);
+        // Delivery is instrumented, not just attempted. This banner is the only
+        // cap channel we can observe at all, so an undelivered one has to be
+        // distinguishable from an unsent one — otherwise a zero conversion rate
+        // cannot be told apart from a paywall nobody ever saw.
+        // An app was connected above, so a failure here is a real push failure
+        // rather than an absent channel.
+        const delivered = await pushLogBox(msg, "warning", true, "logbox", "ExecBro", device);
+        trackCapNotification(
+            threshold === 100 ? "100" : "80",
+            delivered,
+            delivered ? "logbox" : (getLastLogBoxError() ?? "unknown")
+        );
     } catch {
+        trackCapNotification(nextThreshold(usage) === 100 ? "100" : "80", false, "threw");
         /* best-effort — never throw into the caller */
     }
 }
@@ -122,6 +161,13 @@ export async function maybeNotifyDeferral(usage: UsageInfo | null, device?: stri
         if (state.deferralNotifiedFor === usage.enforcementStartsAt) return;
         const enforcementDate = new Date(usage.enforcementStartsAt);
         if (Number.isNaN(enforcementDate.getTime())) return; // malformed date — skip, don't mark notified
+        if (noAppToNotifyOn()) {
+            if (!sessionDeferredGrandfather) {
+                sessionDeferredGrandfather = true;
+                trackCapNotification("deferral", false, "deferred_no_app");
+            }
+            return;
+        }
         const date = enforcementDate.toLocaleDateString("en-GB", { day: "2-digit", month: "long" });
         const msg =
             NOT_AN_APP_ERROR +
@@ -134,8 +180,14 @@ export async function maybeNotifyDeferral(usage: UsageInfo | null, device?: stri
         state.deferralNotifiedFor = usage.enforcementStartsAt;
         write(state);
         // warning level (grey) + expanded=true → dismissible full-screen LogBox view.
-        await pushLogBox(msg, "warning", true, "logbox", "ExecBro", device);
+        const delivered = await pushLogBox(msg, "warning", true, "logbox", "ExecBro", device);
+        trackCapNotification(
+            "deferral",
+            delivered,
+            delivered ? "logbox" : (getLastLogBoxError() ?? "unknown")
+        );
     } catch {
+        trackCapNotification("deferral", false, "threw");
         /* best-effort — never throw into the caller */
     }
 }

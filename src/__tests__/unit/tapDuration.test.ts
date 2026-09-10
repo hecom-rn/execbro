@@ -176,11 +176,15 @@ describe("tap duration — Android", () => {
 
     it("holds on the fiber path", async () => {
         connectAndroidApp();
+        // 200 dp + the status bar inset. The exec mock reports density 160 (scale 1)
+        // and its dumpsys answers a 63px status bar frame. Without that term the
+        // fiber+native path taps one status bar too high — see
+        // tapAndroidStatusBarInset.test.ts.
         // strategy is pinned: for a testID query `auto` tries accessibility first
         // (resource-id is a cheaper lookup than a fiber walk), so without this the
         // test would assert the fiber path while exercising the accessibility one.
-        // Fiber measures window-relative dp; the status bar inset (63dp from the
-        // dumpsys mock) is added before the dp->px scaling: 200 + 63 = 263.
+        // Fiber measures window-relative dp; the 63px status bar inset from the
+        // dumpsys mock is added after the dp->px scaling: 200 + 63 = 263.
         await tap({ testID: "submit-btn", device: TARGET, strategy: "fiber", duration: HOLD_MS, screenshot: false, verify: false });
 
         expect(inputCommands()).toEqual([`input swipe 100 263 100 263 ${HOLD_MS}`]);

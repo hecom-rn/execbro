@@ -11,8 +11,9 @@ import {
 import { getTargetPlatform } from "./state.js";
 import { resolveConnectedAppByDevice } from "./connection.js";
 import { recordToolCall } from "./screenStaleness.js";
-import { UserInputError } from "./errors.js";
+import { EnvironmentError, UserInputError, type FailureKind } from "./errors.js";
 import { estimateImageTokens } from "./toolHelpers.js";
+import { redactSecrets, redactionEnabled } from "./redact.js";
 import { connectedApps, shouldShowFeedbackHint, markFeedbackHintShown, pushLogBox } from "./index.js";
 import { ensureLicense, getUsageInfo } from "./license.js";
 import { freezeSessionVerdict, isToolBlocked, usageWarningLine } from "../pro/usageGate.js";
@@ -96,8 +97,11 @@ export function registerToolWithTelemetry(
         await ensureLicense();
         freezeSessionVerdict(getUsageInfo());
         const usageNow = getUsageInfo();
-        void maybeNotifyDeferral(usageNow);
-        void maybeNotifyUsage(usageNow);
+        // Pass the caller's device through: with a single app connected an
+        // undefined device already resolves to it, but with several connected
+        // it resolves to "ambiguous" and the banner is silently dropped.
+        void maybeNotifyDeferral(usageNow, args?.device);
+        void maybeNotifyUsage(usageNow, args?.device);
         const gate = isToolBlocked(toolName);
         if (gate.blocked) {
             return { content: [{ type: "text" as const, text: gate.message! }] };
@@ -106,6 +110,7 @@ export function registerToolWithTelemetry(
         let success = true;
         let errorMessage: string | undefined;
         let errorContext: string | undefined;
+        let failureKind: FailureKind | undefined;
         // Which of the two failure paths ran. Both set success=false and share the
         // trackToolInvocation call below, so without this the dashboard cannot tell
         // a handled { isError: true } return from a real thrown exception — and only
@@ -134,6 +139,29 @@ export function registerToolWithTelemetry(
 
         try {
             const result = await handler(args);
+            // Secret redaction, applied once for every tool rather than at each
+            // render site. Runs before anything else reads the text, so the
+            // token accounting and the dev-mode JSONL on disk both see the
+            // redacted string.
+            //
+            // There is deliberately no per-call escape. `verbose:true` used to
+            // lift this, which put the hatch in the hands of the model — the
+            // exact actor a mechanism is supposed to not depend on, and the
+            // reason this exists rather than an instruction telling the agent
+            // to be careful. Its stated justification, that a per-call flag
+            // leaves an audit trail, does not hold either: the trail and the
+            // leak are the same file. Transcripts are append-only and
+            // permanent, so one revealing call is not undone by a thousand
+            // redacted ones. EXECBRO_REDACT=off is the only way out, it is set
+            // by a human, and it needs a restart — which is the right amount
+            // of friction for reading a live credential.
+            if (Array.isArray(result?.content) && redactionEnabled()) {
+                for (const item of result.content) {
+                    if (item.type === "text" && typeof item.text === "string") {
+                        item.text = redactSecrets(item.text);
+                    }
+                }
+            }
             // Check if result indicates an error
             if (result?.isError) {
                 success = false;
@@ -145,6 +173,11 @@ export function registerToolWithTelemetry(
             // for unmeaningful outcomes where isError is false but we still want triage context).
             if (result?._errorContext) {
                 errorContext = result._errorContext;
+            }
+            // Structured cause, when the tool knows it. Independent of
+            // _errorContext because that field is not reliably a closed set.
+            if (result?._failureKind) {
+                failureKind = result._failureKind;
             }
             // Check for empty result (only on success). A tool that reports
             // `_emptyResult` wins over the detector: the detector can only see
@@ -222,6 +255,11 @@ export function registerToolWithTelemetry(
             if (error instanceof UserInputError && error.context) {
                 errorContext = error.context;
             }
+            if (error instanceof EnvironmentError) {
+                failureKind = error.kind;
+            } else if (error instanceof UserInputError && error.kind) {
+                failureKind = error.kind;
+            }
             // H2 (Step 9): UserInputError marks agent-input mistakes (unknown
             // device, missing predicate, ambiguous match). They flow through
             // telemetry's trackToolInvocation in the finally block; we just
@@ -233,13 +271,32 @@ export function registerToolWithTelemetry(
             throw error;
         } finally {
             const duration = Date.now() - startTime;
+            // Both of these reach remote telemetry without passing through the
+            // content redaction above. errorMessage: a failing request often
+            // carries its URL, query string included. errorContext: tools set
+            // it to their own raw input. One guard covers every path that sets
+            // either. The thrown error itself is re-thrown unmodified \u2014 the
+            // MCP client renders it, and rewriting an in-flight exception is a
+            // bigger change than this exposure warrants.
+            if (redactionEnabled()) {
+                // catalog:false — these two go to telemetry, and a catalog
+                // footer there is noise in an error string rather than context
+                // for an agent reading a tool result.
+                if (errorMessage) errorMessage = redactSecrets(errorMessage, { catalog: false });
+                // errorContext carries the raw tool input on failure —
+                // execute_in_app sets it to the expression verbatim — and it
+                // reaches PostHog as error_context (telemetry.ts:622) and the
+                // local JSONL. It never passes through the content redaction
+                // above, because it is not content.
+                if (errorContext) errorContext = redactSecrets(errorContext, { catalog: false });
+            }
             // Attribute the NEXT tool's screen changes. Recorded here, in
             // `finally`, so that while a handler runs this still names the
             // PREVIOUS tool — which is what screenStaleness needs to tell
             // "the agent moved the screen" from "someone else did".
             recordToolCall(toolName);
             const targetPlatform = invocationPlatform(toolName, args);
-            trackToolInvocation(toolName, success, duration, errorMessage, errorContext, inputTokens, outputTokens, targetPlatform, emptyResult, meaningful, changeRate, tapStrategy, iosDriver, responsePreview, emptyReason, artifactKey, ocrClosestMatch, fiberPressableCount, accessibilityMatchCount, appRoute, errorOrigin);
+            trackToolInvocation(toolName, success, duration, errorMessage, errorContext, inputTokens, outputTokens, targetPlatform, emptyResult, meaningful, changeRate, tapStrategy, iosDriver, responsePreview, emptyReason, artifactKey, ocrClosestMatch, fiberPressableCount, accessibilityMatchCount, appRoute, errorOrigin, failureKind);
             // Classify this invocation's platform kind so PostHog breakdowns can split RN vs Native.
             // RN: any connected app has appDetection. Native: tool name prefixed ios_/android_. Else: null.
             let platformKind: "rn" | "native" | null = null;
@@ -267,6 +324,7 @@ export function registerToolWithTelemetry(
                         package_name: getPackageName(),
                         ...(errorMessage && { error: errorMessage.substring(0, 200) }),
                         ...(errorMessage && { error_category: categorizeError(errorMessage, errorContext) }),
+                        ...(failureKind && { failure_kind: failureKind }),
                         ...(errorOrigin && { error_origin: errorOrigin }),
                         ...(targetPlatform && { platform: targetPlatform }),
                         ...(platformKind && { platform_kind: platformKind }),

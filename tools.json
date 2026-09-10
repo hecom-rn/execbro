@@ -1,8 +1,7 @@
 {
     "generatedFrom": "toolRegistry",
-    "count": 65,
+    "count": 64,
     "tools": [
-        "activate_license",
         "android_key_event",
         "android_launch_app",
         "android_list_packages",
@@ -12,7 +11,6 @@
         "clear_logs",
         "clear_network",
         "connect_metro",
-        "delete_account",
         "disconnect_metro",
         "dismiss_keyboard",
         "ensure_connection",
@@ -24,7 +22,6 @@
         "get_component_tree",
         "get_connection_status",
         "get_images",
-        "get_license_status",
         "get_log_details",
         "get_logs",
         "get_network_requests",
@@ -38,6 +35,7 @@
         "harmony_list_packages",
         "harmony_screenshot",
         "harmony_terminate_app",
+        "http_request",
         "input_text",
         "inspect_at_point",
         "inspect_component",
@@ -50,13 +48,13 @@
         "ios_terminate_app",
         "list_debug_globals",
         "list_devices",
+        "list_secrets",
         "logbox",
         "measure",
         "navigate",
         "network_condition",
         "network_mock",
         "network_replay",
-        "ocr_screenshot",
         "pinch",
         "redux_dispatch",
         "redux_get_state",
@@ -66,12 +64,10 @@
         "search_network",
         "send_feedback",
         "swipe",
-        "tap"
+        "tap",
+        "vault_capture"
     ],
     "params": {
-        "activate_license": [
-            "token"
-        ],
         "android_key_event": [
             "deviceId",
             "key"
@@ -113,9 +109,6 @@
         ],
         "connect_metro": [
             "port"
-        ],
-        "delete_account": [
-            "confirm"
         ],
         "disconnect_metro": [
             "device"
@@ -181,7 +174,6 @@
             "list",
             "source"
         ],
-        "get_license_status": [],
         "get_log_details": [
             "id",
             "maxLength",
@@ -260,6 +252,14 @@
             "bundleName",
             "device"
         ],
+        "http_request": [
+            "auth",
+            "body",
+            "headers",
+            "maxResultLength",
+            "method",
+            "url"
+        ],
         "input_text": [
             "component",
             "device",
@@ -327,6 +327,7 @@
         "list_devices": [
             "refresh"
         ],
+        "list_secrets": [],
         "logbox": [
             "action",
             "device",
@@ -380,10 +381,6 @@
             "method",
             "requestId",
             "url"
-        ],
-        "ocr_screenshot": [
-            "deviceId",
-            "platform"
         ],
         "pinch": [
             "angle",
@@ -465,6 +462,11 @@
             "verify",
             "x",
             "y"
+        ],
+        "vault_capture": [
+            "device",
+            "expression",
+            "origin"
         ]
     }
 }

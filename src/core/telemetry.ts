@@ -98,6 +98,7 @@ interface TelemetryEvent {
     fiberPressableCount?: string; // tap: count of visible pressables fiber found
     accessibilityMatchCount?: string; // tap: count of accessibility elements found
     appRoute?: string; // tap: best-effort screen identifier (route name or bundle id)
+    failureKind?: string; // structured cause set at the throw site (FailureKind in errors.ts)
     properties?: Record<string, string | number | boolean>;
 }
 
@@ -477,7 +478,8 @@ export function trackToolInvocation(
     fiberPressableCount?: string,
     accessibilityMatchCount?: string,
     appRoute?: string,
-    errorOrigin?: ErrorOrigin
+    errorOrigin?: ErrorOrigin,
+    failureKind?: string
 ): void {
     // Append to local JSONL file for local dashboard (dev mode only)
     if (isDevMode()) try {
@@ -510,6 +512,7 @@ export function trackToolInvocation(
         if (fiberPressableCount) localEvent.fiberPressableCount = fiberPressableCount;
         if (accessibilityMatchCount) localEvent.accessibilityMatchCount = accessibilityMatchCount;
         if (appRoute) localEvent.appRoute = appRoute;
+        if (failureKind) localEvent.failureKind = failureKind;
         appendFileSync(TELEMETRY_JSONL_PATH, JSON.stringify(localEvent) + "\n");
     } catch {
         // Non-critical — local file sink failure should never affect tool execution
@@ -592,6 +595,7 @@ export function trackToolInvocation(
     if (fiberPressableCount) event.fiberPressableCount = fiberPressableCount;
     if (accessibilityMatchCount) event.accessibilityMatchCount = accessibilityMatchCount;
     if (appRoute) event.appRoute = appRoute;
+    if (failureKind) event.failureKind = failureKind;
 
     // Counted signal: this is the metering heartbeat the free-tier cap relies
     // on. Fires whenever meteringEnabled — including when the user opted out
@@ -782,6 +786,36 @@ export function trackAutoReconnect(
  * Records app detection result as an app_detected event.
  * Called from appDetection.ts after successful detection.
  */
+/**
+ * Cap notification delivery. The 80%/100% LogBox banner is the only cap channel
+ * observable from the server: the in-response quota message goes to the agent,
+ * and whether the agent surfaced it to the human cannot be measured here.
+ *
+ * Without this event a zero conversion rate is unreadable, because the denominator
+ * "installs that crossed 600" assumes the person was actually shown a paywall.
+ * See docs/devtools-core/specs/2026-09-06-cap-notification-instrumentation-design.md.
+ *
+ * Rides the existing schema: threshold -> blob2, delivered -> blob3, reason -> blob8.
+ * blob1-20 are fully allocated, and this event carries no tool name or success of
+ * its own, so those columns are free for it.
+ */
+export function trackCapNotification(
+    threshold: "80" | "100" | "deferral",
+    delivered: boolean,
+    reason: string
+): void {
+    if (!telemetryEnabled) return;
+
+    dispatch({
+        name: "cap_notified",
+        timestamp: Date.now(),
+        isFirstRun: isFirstRun(),
+        toolName: threshold,
+        success: delivered,
+        errorContext: reason,
+    });
+}
+
 export function trackAppDetection(detection: {
     reactNativeVersion: string;
     architecture: string;
