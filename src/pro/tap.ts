@@ -56,10 +56,10 @@ export interface TapOptions {
     duration?: number;
     burst?: boolean;
     /**
-     * Target device. Accepts an iOS simulator UDID, an Android adb serial,
-     * or a substring matched against connected RN apps / booted simulators /
-     * attached Android devices. See deviceResolver.resolveDeviceTarget for
-     * the full resolution algorithm.
+     * Target device. Accepts an iOS simulator UDID, an Android adb serial, a
+     * HarmonyOS hdc target key, or a substring matched against connected RN
+     * apps / booted simulators / attached Android & HarmonyOS devices. See
+     * deviceResolver.resolveDeviceTarget for the full resolution algorithm.
      */
     device?: string;
 }

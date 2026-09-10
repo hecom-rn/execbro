@@ -114,10 +114,24 @@ function nativeBindingOf(app: {
  * a fresh inventory will not change the app's binding.
  */
 export function nativeBindingUnavailableError(target: DeviceTarget): DeviceResolverError {
+    const backend =
+        target.platform === "harmony"
+            ? "hdc target"
+            : target.platform === "ios"
+            ? "simctl device"
+            : "adb device";
+    // Harmony has an escape hatch the other platforms lack: an exact hdc key
+    // (resolution Step 2) resolves with no registry correlation at all, so the
+    // refusal must point at it — a bare "use CDP tools" reads as a dead end
+    // when the device is right there and only the binding is missing.
+    const advice =
+        target.platform === "harmony"
+            ? 'Pass device="<hdc target key>" (list_devices enumerates keys) to address it natively — an exact key resolves without registry correlation. CDP-level tools (logs, network, get_screen_state, inspect_*, execute_in_app) also work.'
+            : "Use CDP-level tools instead (logs, network, get_screen_state, inspect_*, execute_in_app), or run the app on a managed device.";
     return {
         code: "NATIVE_BACKEND_UNAVAILABLE",
-        message: `App "${target.deviceName}" is only connected through Metro and is not bound to any adb/simctl device, so native tools (screenshot, touch, keys, packages) cannot reach it. ` +
-            "Use CDP-level tools instead (logs, network, get_screen_state, inspect_*, execute_in_app), or run the app on a managed device."
+        message: `App "${target.deviceName}" is only connected through Metro and is not bound to any ${backend}, so native tools (screenshot, touch, keys, packages) cannot reach it. ` +
+            advice
     };
 }
 
@@ -297,14 +311,43 @@ async function resolveDeviceTargetInner(
                     // best-effort; fall through with undefined udid
                 }
             }
+            // Same story for harmony: connect-time detection only correlates
+            // an hdc target when exactly one qualifies (appDetection) and
+            // never re-runs, so a device attached after the app connected —
+            // or a second device arriving later — leaves the registry entry
+            // unbound and every native tool refuses it. Correlate on demand
+            // under the same exactly-one rule (several targets is still a
+            // guess, and a wrong key points native tools at the wrong
+            // screen); adopt-and-write-back heals every later call. The
+            // inventory is refreshed rather than read from cache because the
+            // result is WRITTEN into the registry — a stale miss there would
+            // bind the app to the wrong screen persistently.
+            let harmonyTargetKey = m.harmonyTargetKey;
+            if (m.platform === "harmony" && !harmonyTargetKey) {
+                try {
+                    const inv = await listAllDevices({ refresh: true });
+                    const connected = inv.harmony.targets.filter((t) => t.state === "connected");
+                    if (connected.length === 1) {
+                        harmonyTargetKey = connected[0].key;
+                        m.harmonyTargetKey = harmonyTargetKey;
+                    }
+                } catch {
+                    // best-effort; fall through with no key
+                }
+            }
             return ok(
                 {
                     platform: m.platform,
                     iosUdid,
                     androidSerial: m.adbSerial,
+                    harmonyTargetKey,
                     deviceName: m.deviceInfo.deviceName,
                     source: "registry",
-                    nativeBinding: nativeBindingOf(m)
+                    nativeBinding: nativeBindingOf({
+                        simulatorUdid: m.simulatorUdid,
+                        adbSerial: m.adbSerial,
+                        harmonyTargetKey
+                    })
                 },
                 note
             );
@@ -468,9 +511,20 @@ async function resolveDeviceTargetInner(
                             platform: match.platform,
                             iosUdid: match.platform === "ios" ? match.identifier : undefined,
                             androidSerial: match.platform === "android" ? match.identifier : undefined,
+                            // The remembered harmony key must round-trip here:
+                            // without it nativeBinding fell back to "adb",
+                            // which checkNativeBackendAvailable treats as
+                            // reachable — native calls then went to adb's own
+                            // default device (a different physical screen).
+                            harmonyTargetKey: match.platform === "harmony" ? match.identifier : undefined,
                             deviceName: match.name,
                             source: "default",
-                            nativeBinding: match.platform === "ios" ? "simctl" : "adb",
+                            nativeBinding:
+                                match.platform === "ios"
+                                    ? "simctl"
+                                    : match.platform === "harmony"
+                                    ? "hdc"
+                                    : "adb",
                         },
                     };
                 }

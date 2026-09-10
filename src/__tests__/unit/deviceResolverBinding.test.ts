@@ -5,6 +5,7 @@ type RegistryEntry = {
         platform: "ios" | "android" | "harmony";
         simulatorUdid?: string;
         adbSerial?: string;
+        harmonyTargetKey?: string;
         deviceInfo: { deviceName: string };
     };
 };
@@ -32,13 +33,14 @@ jest.unstable_mockModule("../../core/deviceDiscovery.js", () => ({
 }));
 
 const recordDeviceMock = jest.fn();
+const listDevicesMock = jest.fn<() => Array<Record<string, unknown>>>(() => []);
 jest.unstable_mockModule("../../core/projectMemory.js", () => ({
     recordDevice: recordDeviceMock,
-    listDevices: jest.fn<() => Array<never>>(() => []),
+    listDevices: listDevicesMock,
     recordScreenMetrics: jest.fn()
 }));
 
-const { resolveDeviceTarget } = await import("../../core/deviceResolver.js");
+const { resolveDeviceTarget, nativeBindingUnavailableError } = await import("../../core/deviceResolver.js");
 
 function emptyDiscovery() {
     return {
@@ -64,6 +66,7 @@ describe("native binding computation in resolveDeviceTarget", () => {
         listAllDevicesMock.mockReset();
         getConnectedAppsMock.mockReturnValue([]);
         listAllDevicesMock.mockResolvedValue(emptyDiscovery());
+        listDevicesMock.mockReset().mockReturnValue([]);
         recordDeviceMock.mockReset();
     });
 
@@ -164,5 +167,110 @@ describe("native binding computation in resolveDeviceTarget", () => {
         getConnectedAppsMock.mockReturnValue([harmonyApp()]);
         const r = await resolveDeviceTarget("emulator");
         expect(r.ok).toBe(true);
+    });
+
+    it("correlates an unbound harmony registry app with the single connected hdc target and writes the key back", async () => {
+        const app = harmonyApp();
+        getConnectedAppsMock.mockReturnValue([app]);
+        listAllDevicesMock.mockResolvedValue({
+            ...emptyDiscovery(),
+            harmony: { available: true, targets: [{ key: "127.0.0.1:5559", state: "connected" }] }
+        });
+
+        const r = await resolveDeviceTarget("emulator");
+        expect(r.ok).toBe(true);
+        if (r.ok) {
+            expect(r.target.platform).toBe("harmony");
+            expect(r.target.nativeBinding).toBe("hdc");
+            expect(r.target.harmonyTargetKey).toBe("127.0.0.1:5559");
+        }
+        // The write-back heals the registry entry — every later resolution
+        // (and native tool) sees the binding without re-correlating.
+        expect(app.app.harmonyTargetKey).toBe("127.0.0.1:5559");
+    });
+
+    it("keeps binding 'none' when several hdc targets are connected — no guessing", async () => {
+        const app = harmonyApp();
+        getConnectedAppsMock.mockReturnValue([app]);
+        listAllDevicesMock.mockResolvedValue({
+            ...emptyDiscovery(),
+            harmony: {
+                available: true,
+                targets: [
+                    { key: "127.0.0.1:5559", state: "connected" },
+                    { key: "6HQ0226409005934", state: "connected" }
+                ]
+            }
+        });
+
+        const r = await resolveDeviceTarget("emulator");
+        expect(r.ok).toBe(true);
+        if (r.ok) {
+            expect(r.target.nativeBinding).toBe("none");
+            expect(r.target.harmonyTargetKey).toBeUndefined();
+        }
+        expect(app.app.harmonyTargetKey).toBeUndefined();
+    });
+});
+
+describe("remembered-device default path binding", () => {
+    beforeEach(() => {
+        getConnectedAppsMock.mockReset().mockReturnValue([]);
+        listAllDevicesMock.mockReset();
+        listDevicesMock.mockReset().mockReturnValue([]);
+        recordDeviceMock.mockReset();
+    });
+
+    it("round-trips the harmony key and hdc binding for a remembered harmony device", async () => {
+        // Regression: this path used to emit nativeBinding "adb" with no
+        // harmonyTargetKey for harmony matches — checkNativeBackendAvailable
+        // treated it as reachable and native calls went to adb's own default
+        // device, a different physical screen.
+        listAllDevicesMock.mockResolvedValue({
+            ios: {
+                available: true,
+                simulators: [{ udid: "12345678-1234-1234-1234-123456789012", name: "iPhone 17 Pro", state: "booted" }]
+            },
+            android: { available: true, emulators: [], physical: [] },
+            harmony: { available: true, targets: [{ key: "127.0.0.1:5559", state: "connected" }] },
+            summary: { booted: 2, total: 2 }
+        });
+        listDevicesMock.mockReturnValue([
+            { identifier: "127.0.0.1:5559", name: "emulator", platform: "harmony", lastUsedAt: Date.now() }
+        ]);
+
+        const r = await resolveDeviceTarget(undefined);
+        expect(r.ok).toBe(true);
+        if (r.ok) {
+            expect(r.target.platform).toBe("harmony");
+            expect(r.target.harmonyTargetKey).toBe("127.0.0.1:5559");
+            expect(r.target.nativeBinding).toBe("hdc");
+        }
+    });
+});
+
+describe("nativeBindingUnavailableError message", () => {
+    it("points harmony callers at the explicit hdc-key escape hatch", () => {
+        const e = nativeBindingUnavailableError({
+            platform: "harmony",
+            deviceName: "emulator",
+            source: "registry",
+            nativeBinding: "none"
+        });
+        expect(e.code).toBe("NATIVE_BACKEND_UNAVAILABLE");
+        expect(e.message).toContain("hdc target");
+        expect(e.message).toContain('device="<hdc target key>"');
+    });
+
+    it("keeps the CDP-tools advice for other platforms", () => {
+        const e = nativeBindingUnavailableError({
+            platform: "android",
+            androidSerial: undefined,
+            deviceName: "Pixel",
+            source: "registry",
+            nativeBinding: "none"
+        });
+        expect(e.message).toContain("adb device");
+        expect(e.message).toContain("CDP-level tools");
     });
 });

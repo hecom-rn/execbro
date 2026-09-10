@@ -127,7 +127,7 @@ describe("resolveHarmonyTargetKey", () => {
         ]);
         const r = await resolveHarmonyTargetKey("emulator");
         expect(r.ok).toBe(false);
-        if (!r.ok) expect(r.response.content[0].text).toContain("not bound to any adb/simctl device");
+        if (!r.ok) expect(r.response.content[0].text).toContain('device="<hdc target key>"');
     });
 
     it("passes through the hdc key for a bound harmony target", async () => {

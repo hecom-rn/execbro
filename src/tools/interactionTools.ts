@@ -70,8 +70,8 @@ export function registerInteractionTools(server: McpServer): void {
                 primaryInteractionBanner() + "\n" +
                 "PURPOSE: Single unified tap entry point — resolves text/testID/component/coordinates into a real touch event on the correct device.\n" +
                 "WHEN TO USE: Any time you need to press a button, focus an input, open a menu, or verify a handler fires. Prefer testID, then text, then component, then (x,y) from a screenshot's pressables list.\n" +
-                "WORKFLOW: ios_screenshot or android_screenshot -> tap(testID=\"...\") | tap(text=\"...\") | tap(x, y) -> screenshot again to verify. Use burst=true when meaningful=false but visual feedback looks transient.\n" +
-                "LIMITATIONS: iOS needs AXe (brew install cameroncooke/axe/axe) or IDB for accessibility/coordinate taps. Non-ASCII text skips fiber (Hermes); prefer testID. Pass `device` to target a specific simulator/emulator when multiple are available — call list_devices for the inventory.\n" +
+                "WORKFLOW: ios/android/harmony_screenshot -> tap(testID=\"...\") | tap(text=\"...\") | tap(x, y) -> screenshot again to verify. Use burst=true when meaningful=false but visual feedback looks transient.\n" +
+                "LIMITATIONS: iOS needs AXe (brew install cameroncooke/axe/axe) or IDB for accessibility/coordinate taps. Non-ASCII text skips fiber (Hermes); prefer testID. Pass `device` to target a specific device when multiple are available — call list_devices for the inventory.\n" +
                 "GOOD: tap({ testID: \"login-btn\" }); tap({ text: \"Submit\" }); tap({ x: 300, y: 600 }); tap({ x: 300, y: 600, native: true, device: \"emulator-5554\" })\n" +
                 "LONG PRESS: tap({ testID: \"row-3\", duration: 800 }) holds the touch.\n" +
                 "BAD: tap({ text: \"\" }) or tap({ x: 0, y: 0 }) — missing a target. tap({ text: \"Submit\" }) without first screenshotting an ambiguous screen.\n" +
@@ -130,7 +130,7 @@ export function registerInteractionTools(server: McpServer): void {
                     .optional()
                     .default(false)
                     .describe(
-                        "When true, tap coordinates directly via ADB/simctl without requiring a React Native connection. " +
+                        "When true, tap coordinates directly via simctl/adb/hdc without requiring a React Native connection. " +
                         "Useful for interacting with native UI, system dialogs, or non-RN apps. Requires x/y coordinates."
                     ),
                 device: z
@@ -139,8 +139,9 @@ export function registerInteractionTools(server: McpServer): void {
                     .describe(
                         "Target device. Accepts (a) an iOS simulator UDID, " +
                         "(b) an Android adb serial like 'emulator-5554', " +
-                        "(c) the iOS simulator or Android emulator/device name (substring match), or " +
-                        "(d) a connected RN app's deviceName (substring match against get_apps output). " +
+                        "(c) a HarmonyOS hdc target key like '127.0.0.1:5559', " +
+                        "(d) the iOS simulator, Android emulator/device, or HarmonyOS target name (substring match), or " +
+                        "(e) a connected RN app's deviceName (substring match against get_apps output). " +
                         "Omit when exactly one device is available. Call list_devices to enumerate."
                     ),
                 screenshot: z
@@ -302,13 +303,13 @@ export function registerInteractionTools(server: McpServer): void {
         }
     );
     
-    // Tool: Cross-platform swipe — auto-routes to iOS or Android backend
+    // Tool: Cross-platform swipe — auto-routes to iOS, Android, or HarmonyOS backend
     registerToolWithTelemetry(
         server,
         "swipe",
         {
             description:
-                "Swipe gesture that auto-routes to the correct platform (iOS or Android), with pixel-diff verification." +
+                "Swipe gesture that auto-routes to the correct platform (iOS, Android, or HarmonyOS), with pixel-diff verification." +
                 primaryInteractionBanner() + "\n" +
                 "PURPOSE: Single unified swipe entry point. Easiest form: swipe({ direction: \"up\" }) scrolls to reveal more content (\"down\"/\"left\"/\"right\" also work; bare swipe() defaults to \"up\"). Optional distance in screenshot pixels (default 33% of axis). For precise control, pass all four coordinates (startX/startY/endX/endY) — they take precedence over direction.\n" +
                 "WHEN TO USE: Scrolling lists, paging carousels, pull-to-refresh, dismissing sheets, opening drawers. Especially useful in virtualized lists (FlatList/SectionList) where off-screen items aren't mounted in the fiber tree.\n" +
@@ -349,8 +350,9 @@ export function registerInteractionTools(server: McpServer): void {
                     .describe(
                         "Target device. Accepts (a) an iOS simulator UDID, " +
                         "(b) an Android adb serial like 'emulator-5554', " +
-                        "(c) the iOS simulator or Android emulator/device name (substring match), or " +
-                        "(d) a connected RN app's deviceName (substring match against get_apps output). " +
+                        "(c) a HarmonyOS hdc target key like '127.0.0.1:5559', " +
+                        "(d) the iOS simulator, Android emulator/device, or HarmonyOS target name (substring match), or " +
+                        "(e) a connected RN app's deviceName (substring match against get_apps output). " +
                         "Omit when exactly one device is available. Call list_devices to enumerate."
                     ),
                 verify: z
@@ -652,8 +654,7 @@ export function registerInteractionTools(server: McpServer): void {
         "pinch",
         {
             description:
-                "Pinch-to-zoom using REAL two-finger touch events, with pixel-diff verification. ANDROID EMULATOR ONLY (iOS in progress)." +
-                primaryInteractionBanner() + "\n" +
+                "Pinch-to-zoom using REAL two-finger touch events, with pixel-diff verification. ANDROID EMULATOR ONLY (iOS in progress; HarmonyOS not supported).\n" +
                 "PURPOSE: Zoom a map, image gallery, photo viewer, or any zoomable surface. pinch({ direction: \"out\" }) zooms in at screen centre; \"in\" zooms out. Pass x/y to zoom around a specific point.\n" +
                 "HOW IT WORKS: Two independent contacts sent through the emulator's multi-touch bridge as real kernel touch events. It works below the app, so it drives React Native, native views, WebViews — anything on screen.\n" +
                 "VERIFICATION: verify=true (default) returns `verification.meaningful` — false means nothing zoomed (not zoomable, already at a zoom limit, or the focal point missed).\n" +
@@ -1077,7 +1078,7 @@ export function registerInteractionTools(server: McpServer): void {
                 "\nWORKFLOW: get_screen_state -> input_text({ testID, text }) -> read `verified`.\n" +
                 "VERIFICATION: the write is read back and compared EXACTLY. A mismatch retries once, then fails with `sent` vs `landed`.\n" +
                 "AMBIGUITY: several matching inputs -> the tool refuses and returns a numbered candidate list; pick one with `index`.\n" +
-                "NATIVE SCREENS: with no React fiber tree at all (system dialog, native onboarding, non-RN app) this falls back automatically to typing into whatever the OS reports as focused — tap it first. native:true forces that path, and ignores testID/component/textMatch: it cannot target, only type into what already has focus." +
+                "NATIVE SCREENS: with no React fiber tree (system dialog, native onboarding, non-RN app) this falls back to typing into whatever the OS reports as focused — tap it first. native:true forces that path, and ignores testID/component/textMatch: it cannot target, only type into what has focus." +
                 "\nLIMITATIONS: fields with no onChangeText fall back to the platform driver, which is US-keyboard only — non-ASCII fails there. The native path shares that limit.\n" +
                 "GOOD: input_text({ testID: \"new-topic-title\", text: \"Q3 budget\", replace: true })\n" +
                 "GOOD: input_text({ text: \"1234\", native: true }) — a system PIN prompt, no RN screen behind it.\n" +
