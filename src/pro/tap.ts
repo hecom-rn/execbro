@@ -2131,7 +2131,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         };
     }
 
-    // Native mode: bypass React Native connection, tap directly via ADB/simctl
+    // Native mode: bypass React Native connection, tap directly via simctl/adb/hdc
     if (options.native && hasCoordinates) {
         const nativeResolved = await resolveDeviceTarget(options.device);
         if (!nativeResolved.ok) {
@@ -2142,16 +2142,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
             };
         }
         const platform: DevicePlatform = nativeResolved.target.platform;
-        if (platform === "harmony") {
-            // Native coordinate taps on harmony are not wired yet (hdc uiInput
-            // lands with the harmony tap strategies task).
-            return {
-                success: false,
-                query,
-                error: "Native coordinate taps on HarmonyOS are not supported yet."
-            };
-        }
-        // Native mode shells out to adb/simctl with whatever identifier it
+        // Native mode shells out to simctl/adb/hdc with whatever identifier it
         // resolved. An app bound to no managed device would send those calls
         // to the backend's own default device — a different screen (verified
         // 2026-09-01). Refuse instead.
@@ -2161,6 +2152,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         }
         const nativeUdid: string | undefined = nativeResolved.target.iosUdid;
         const nativeSerial: string | undefined = nativeResolved.target.androidSerial;
+        const nativeHdcKey: string | undefined = nativeResolved.target.harmonyTargetKey;
 
         const nativeShouldScreenshot = options.screenshot !== false;
         // Decoupled (I5, 2026-05-16): verify runs even when image bytes aren't returned.
@@ -2168,7 +2160,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         let nativeBeforeBuffer: Buffer | null = null;
         let nativeScreenshotMeta: { originalWidth: number; originalHeight: number; scaleFactor: number } | undefined;
         if (nativeShouldVerify) {
-            const before = await captureScreenshot(platform, nativeUdid, nativeSerial);
+            const before = await captureScreenshot(platform, nativeUdid, nativeSerial, nativeHdcKey);
             nativeBeforeBuffer = before?.buffer || null;
             if (before) {
                 nativeScreenshotMeta = {
@@ -2181,7 +2173,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
 
         // If no screenshot was taken for verification, take one just for scaleFactor
         if (!nativeScreenshotMeta) {
-            const ref = await captureScreenshot(platform, nativeUdid, nativeSerial);
+            const ref = await captureScreenshot(platform, nativeUdid, nativeSerial, nativeHdcKey);
             if (ref) {
                 nativeScreenshotMeta = {
                     originalWidth: ref.width,
@@ -2198,7 +2190,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         let result: StrategyResult;
         try {
             result = await withTimeout(
-                tryCoordinateStrategy(query.x!, query.y!, platform, nativeScreenshotMeta, nativeUdid, nativeSerial, options.duration),
+                tryCoordinateStrategy(query.x!, query.y!, platform, nativeScreenshotMeta, nativeUdid, nativeSerial, options.duration, nativeHdcKey),
                 remainingMs(),
                 "native-coordinate"
             );
@@ -2211,7 +2203,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                         reason: err instanceof Error ? err.message : String(err)
                     }
                 ],
-                suggestion: `Tap timed out. Take a screenshot (${platform === "ios" ? "ios_screenshot" : "android_screenshot"}) and retry with coordinates.`
+                suggestion: `Tap timed out. Take a screenshot (${platform === "ios" ? "ios_screenshot" : platform === "harmony" ? "harmony_screenshot" : "android_screenshot"}) and retry with coordinates.`
             });
         }
         if (result.success) {
@@ -2229,6 +2221,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                     beforeBuffer: nativeBeforeBuffer,
                     udid: nativeUdid,
                     deviceId: nativeSerial,
+                    hdcKey: nativeHdcKey,
                     beforeScaleFactor: nativeScreenshotMeta?.scaleFactor,
                     markerPx: nativeMarker
                 }));
@@ -2241,6 +2234,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                     beforeBuffer: nativeBeforeBuffer,
                     udid: nativeUdid,
                     deviceId: nativeSerial,
+                    hdcKey: nativeHdcKey,
                     beforeScaleFactor: nativeScreenshotMeta?.scaleFactor,
                     markerPx: nativeMarker
                 }));
@@ -2262,7 +2256,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         return formatTapFailure({
             query,
             attempted: [{ strategy: "native-coordinate", reason: result.reason }],
-            suggestion: `Take a screenshot (${platform === "ios" ? "ios_screenshot" : "android_screenshot"}) to verify coordinates.`
+            suggestion: `Take a screenshot (${platform === "ios" ? "ios_screenshot" : platform === "harmony" ? "harmony_screenshot" : "android_screenshot"}) to verify coordinates.`
         });
     }
 
@@ -2673,6 +2667,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                     beforeBuffer,
                     udid: targetUdid,
                     deviceId: targetSerial,
+                    hdcKey: targetHdcKey,
                     beforeScaleFactor,
                     markerPx: strategyMarker
                 }));
@@ -2690,6 +2685,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                     beforeBuffer,
                     udid: targetUdid,
                     deviceId: targetSerial,
+                    hdcKey: targetHdcKey,
                     beforeScaleFactor,
                     markerPx: strategyMarker
                 }));
@@ -2912,6 +2908,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                         beforeBuffer,
                         udid: targetUdid,
                         deviceId: targetSerial,
+                        hdcKey: targetHdcKey,
                         beforeScaleFactor,
                         markerPx: fiberMarker
                     }));
@@ -2923,6 +2920,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                         beforeBuffer,
                         udid: targetUdid,
                         deviceId: targetSerial,
+                        hdcKey: targetHdcKey,
                         beforeScaleFactor,
                         markerPx: fiberMarker
                     }));
