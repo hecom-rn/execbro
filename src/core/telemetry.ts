@@ -162,3 +162,4 @@ export function categorizeError(errorMessage: string, errorContext?: string): Er
     }
     return 'unknown';
 }
+

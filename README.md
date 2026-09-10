@@ -44,12 +44,18 @@ Linking is also how [ExecBro Pro](#pricing) attaches to your installation, if yo
 - **iOS Simulator** - Screenshots, app management, URL handling, boot/terminate (via simctl)
 - **Android Devices** - Screenshots, app install/launch, package management (via ADB)
 - **HarmonyOS Devices** - Screenshots, key events, app launch/terminate, package listing, native logs (via hdc; RN on HarmonyOS via react-native-harmony)
-- **Unified Tap** - Single `tap` tool with automatic fallback chain: fiber tree → accessibility → OCR → coordinates. Auto-detects platform, accepts coordinates from screenshots and layout tools unchanged. Returns post-tap screenshot and verifies visual change by default
+- **Unified Tap** - Single `tap` tool with automatic fallback chain: fiber tree → accessibility → coordinates. Auto-detects platform, accepts coordinates from screenshots and layout tools unchanged. Returns post-tap screenshot and verifies visual change by default
 - **Unified Swipe** - Single `swipe` tool that auto-routes to iOS or Android based on the connected device. Takes coordinates in the same screen space as the layout tools and screenshots — no conversion — and returns a `verification.meaningful` signal so agents detect end-of-list, non-scrollable surfaces, and missed coordinates — and on a screen with no React Native connection it says it could not inspect rather than guessing. Essential for scrolling virtualized lists (FlatList/SectionList) where off-screen items aren't in the fiber tree
 - **Real Multi-Touch Pinch** *(Android emulator only — iOS in progress)* - A `pinch` tool that sends two genuine kernel touch contacts through the Android emulator's multi-touch bridge, so it zooms maps, galleries, WebViews, and native views alike — it works below the app, not through React Native. Returns the same `verification.meaningful` signal as `swipe`, and refuses on unsupported targets instead of faking a result
 - **UI Automation** - Swipe, long press (`tap` with `duration`, resolving the target by testID/text/component), key events, and text input on both platforms. `input_text` targets a field itself and verifies the write by reading it back; on Bridgeless/Fabric apps `replace:true` overwrites pre-filled values by updating React state through `onChangeText`, so controlled components (Formik, react-hook-form, useState) stay consistent. `native:true` types into whatever the OS reports as focused, with no RN connection needed, and `dismiss_keyboard` operates the same way
 - **Accessibility Inspection** - Query UI hierarchy to find elements by text, label, or resource ID
-- **OCR Text Extraction** - Extract visible text with tap-ready coordinates via Google Cloud Vision (works on any screen content)
+
+### Credential Safety
+
+- **Secrets never enter the transcript** - Every tool's output passes one redaction chokepoint, so a token is replaced by a handle (`[secret:auth_api.acme.io]`) whether it appears in a network header, a Redux store, a log line or a URL. Credential headers are matched by pattern rather than a fixed list, so vendor-namespaced ones (`x-shopify-access-token`, `x-goog-api-key`, `x-hasura-admin-secret`) are covered too, while `x-request-id` and `x-idempotency-key` are deliberately left alone. There is no per-call escape: `EXECBRO_REDACT=off` is set by a human and needs a restart
+- **Use a credential without reading it** - `list_secrets` names the handles; `http_request({auth:{secret:"api.acme.io"}})` substitutes the value host-side and issues the request from your machine — as `Authorization: Bearer` by default, or in a key header or another scheme, so a credential never has to be pasted in to cover an unsupported shape, and `vault_capture` reads a token out of the app straight into the vault when no captured request revealed one. Each credential is bound to the origin it was observed on and refused elsewhere; the vault is memory-only
+- **Server- vs client-side, isolated** - `http_request` runs from the host with none of the app's TLS trust, proxy, cookie jar or mock rules; `app_request` runs inside the app with all of them. Comparing the two is how you tell a backend bug from a client one — and a 401 from the host where the app succeeds is itself the answer that the backend enforces attestation
+- **App data is treated as data** - The server tells every connecting agent that logs, payloads, component trees and eval results are shaped by whatever the app talked to, and are never to be followed as instructions
 
 ### Multi-Device Debugging
 
@@ -100,7 +106,6 @@ It's one `npm install` plus a single `init()` call in your app's entry file. See
 - React Native app running with Metro bundler
 - **Recommended**: [`execbro-sdk`](#install-the-sdk-recommended) in your app — wires stores and the network layer into the agent for dramatically better debugging (optional; ExecBro works without it)
 - **iOS UI automation**: [AXe CLI](https://github.com/cameroncooke/AXe) (`brew install cameroncooke/axe/axe`, default) or [Facebook IDB](https://fbidb.io/) (`brew install idb-companion`, opt in via `IOS_DRIVER=idb`) — required for tap, swipe, text input, accessibility on iOS Simulator
-- **Optional for offline OCR fallback**: Python 3.6+ (only needed when cloud OCR is unavailable, see [OCR guide](docs/ocr.md))
 
 ## Claude Code Skills
 
@@ -117,7 +122,7 @@ See the [full tool reference](docs/tools.md) for all tools with descriptions. Ke
 | `get_network_requests`                  | Monitor HTTP requests with method/status filtering                                       |
 | `get_screen_state`                      | **Orientation snapshot** — active route, overlays, and every element with a tap-ready `(x, y)` |
 | `get_screen_layout`                     | Screen map of visible components with positions, sizes, and text content                 |
-| `tap`                                   | **Unified tap** — auto-detects platform, tries fiber → accessibility → OCR → coordinates |
+| `tap`                                   | **Unified tap** — auto-detects platform, tries fiber → accessibility → coordinates |
 | `pinch`                                 | **Real two-finger pinch-to-zoom** — Android emulator only (iOS in progress)              |
 | `input_text`                            | Type text — targets and focuses a field itself, or `native:true` for whatever's focused. `replace:true` clears first (Fabric) |
 | `dismiss_keyboard`                      | Blur the focused input and close the on-screen keyboard                                  |
@@ -169,9 +174,8 @@ See the [full tool reference](docs/tools.md) for all tools with descriptions. Ke
 | [App Inspection](docs/app-inspection.md)                   | Debug globals (Apollo, Redux, Expo Router), `execute_in_app`, limitations       |
 | [Layout & Component Inspection](docs/layout-inspection.md) | `get_screen_layout`, component tree, `inspect_at_point`, `find_components`      |
 | [Device Interaction](docs/device-interaction.md)           | Unified `tap`, platform-specific gestures, text input, key events               |
-| [OCR Text Extraction](docs/ocr.md)                         | Cloud Vision OCR, offline fallback, language config, workflows                  |
 | [Claude Code Skills](docs/skills.md)                       | Pre-built skills for session setup, debugging, and automation                   |
-| [Full Tool Reference](docs/tools.md)                       | Complete list of all 58 tools with descriptions                                 |
+| [Full Tool Reference](docs/tools.md)                       | Complete list of all 64 tools with descriptions                                 |
 
 ## How It Works
 

@@ -6,6 +6,7 @@ import { registerToolWithTelemetry, toolRegistry } from "../core/register.js";
 import { getGuideOverview, getGuideByTopic, getAvailableTopics } from "../core/guides.js";
 import { getServerVersion } from "../core/telemetry.js";
 import { getTargetPlatform } from "../core/state.js";
+import { vaultEntries, vaultCatalogLine, vaultSlotHandles } from "../core/vault.js";
 import { formatIssueBody, buildGitHubUrl } from "../core/feedback.js";
 
 export interface MetaToolOptions {
@@ -108,6 +109,52 @@ export function registerMetaTools(server: McpServer, opts: MetaToolOptions): voi
 
             return {
                 content: [{ type: "text" as const, text: output }]
+            };
+        }
+    );
+
+    registerToolWithTelemetry(
+        server,
+        "list_secrets",
+        {
+            description:
+                "List the credentials this session has captured, by handle. Values are never shown.\n" +
+                "PURPOSE: Find the name to pass to http_request({ auth: { secret } }), and see at a glance which entries have expired.\n" +
+                "WHAT YOU GET: handle, kind, the origin it was seen on, age, and JWT expiry where the token carries one. Nothing derived from the token's claims — a JWT's issuer and subject are self-asserted, so they are not reported.\n" +
+                "LIMITATIONS: memory only. A server restart empties the vault, and a handle from an older transcript resolves to nothing.\n" +
+                "GOOD: list_secrets() -> http_request({ url: \"https://api.acme.io/v1/me\", method: \"GET\", auth: { secret: \"api.acme.io\" } })",
+            inputSchema: {},
+        },
+        async () => {
+            const entries = vaultEntries();
+            if (entries.length === 0) {
+                return {
+                    content: [{
+                        type: "text" as const,
+                        text: "No credentials captured yet. The vault fills as the app makes authenticated requests, or via vault_capture. It is memory-only, so a server restart empties it."
+                    }]
+                };
+            }
+            const now = Date.now();
+            const current = vaultSlotHandles();
+            // Mark which entry a bare origin resolves to. Two credentials for
+            // one host is ordinary (a bearer token and a cookie, say), and
+            // without this the agent cannot tell which one `secret: "host"`
+            // will actually send.
+            const lines = entries.map((entry) => {
+                const line = vaultCatalogLine(entry, now);
+                return current.has(entry.handle) ? `${line}  <- sent for secret:"${entry.origin}"` : line;
+            });
+            return {
+                content: [{
+                    type: "text" as const,
+                    text: [
+                        `${entries.length} credential(s) captured this session:`,
+                        ...lines,
+                        "",
+                        "Pass the origin to send whichever is newest for that host, or a handle to pin one exact value."
+                    ].join("\n")
+                }]
             };
         }
     );

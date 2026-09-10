@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { recordToolCall } from "./screenStaleness.js";
 import { shouldShowFeedbackHint, markFeedbackHintShown, pushLogBox } from "./index.js";
+import { redactSecrets, redactionEnabled } from "./redact.js";
 
 // Tools that do NOT require an active Metro connection — excluded from feedback hint trigger
 const NON_METRO_TOOLS = new Set([
@@ -52,6 +53,27 @@ export function registerToolWithTelemetry(
     server.registerTool(toolName, config, async (args: any) => {
         try {
             const result = await handler(args);
+            // Secret redaction, applied once for every tool rather than at each
+            // render site. Runs before anything else reads the text.
+            //
+            // There is deliberately no per-call escape. `verbose:true` used to
+            // lift this, which put the hatch in the hands of the model — the
+            // exact actor a mechanism is supposed to not depend on, and the
+            // reason this exists rather than an instruction telling the agent
+            // to be careful. Its stated justification, that a per-call flag
+            // leaves an audit trail, does not hold either: the trail and the
+            // leak are the same file. Transcripts are append-only and
+            // permanent, so one revealing call is not undone by a thousand
+            // redacted ones. EXECBRO_REDACT=off is the only way out, it is set
+            // by a human, and it needs a restart — which is the right amount
+            // of friction for reading a live credential.
+            if (Array.isArray(result?.content) && redactionEnabled()) {
+                for (const item of result.content) {
+                    if (item.type === "text" && typeof item.text === "string") {
+                        item.text = redactSecrets(item.text);
+                    }
+                }
+            }
             // First-install feedback hint — fires once on first successful Metro-connected tool
             if (!NON_METRO_TOOLS.has(toolName) && shouldShowFeedbackHint()) {
                 markFeedbackHintShown();

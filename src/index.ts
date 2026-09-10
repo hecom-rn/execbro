@@ -5,7 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer as createHttpServer, type ServerResponse } from "node:http";
 
-import { DECISION_TREE } from "./core/guides.js";
+import { DECISION_TREE, UNTRUSTED_DATA_RULE } from "./core/guides.js";
 import {
     connectedApps,
     cancelAllReconnectionTimers,
@@ -44,21 +44,31 @@ export { toolRegistry };
 const httpRequested = process.argv.includes("--http");
 const httpAllowed = httpRequested && !isPublishedBuild();
 
+/**
+ * Sent to every agent when it connects. The untrusted-data rule leads, before
+ * the decision tree: an agent that reads only the opening lines should still
+ * have seen it.
+ */
+export const SERVER_INSTRUCTIONS: string = [
+    "React Native debugging MCP server.",
+    "",
+    UNTRUSTED_DATA_RULE,
+    "",
+    DECISION_TREE,
+    "",
+    "Call get_usage_guide with no arguments for the same decision tree plus a summary of every guide."
+].join("\n");
+
 const server = new McpServer(
     {
         name: "ExecBro (Mobile DevTools)",
         version: "1.0.0"
     },
     {
-        instructions: [
-            "React Native debugging MCP server.",
-            "",
-            DECISION_TREE,
-            "",
-            "Call get_usage_guide with no arguments for the same decision tree plus a summary of every guide."
-        ].join("\n")
+        instructions: SERVER_INSTRUCTIONS
     }
 );
+
 installToolRegistryInterceptor(server);
 
 registerMetaTools(server, {
@@ -172,6 +182,26 @@ async function main() {
                         // process restarted.
                         const transport = new StreamableHTTPServerTransport({
                             sessionIdGenerator: undefined,
+                            // Loopback is not a boundary against DNS rebinding:
+                            // the victim's own browser is already on it. A page
+                            // that re-points its hostname at 127.0.0.1 becomes
+                            // same-origin with this port, so CORS never runs and
+                            // the page gets the full tool surface — REPL, tap,
+                            // screenshots — against the developer's app.
+                            //
+                            // The Host header is what survives that trick: a
+                            // rebound page still sends its own hostname. Both
+                            // lists are load-bearing — each branch of the SDK's
+                            // validateRequestHeaders() is guarded by a
+                            // `length > 0` test, so the flag alone passes
+                            // everything. Origin is absent on non-browser
+                            // clients and only checked when present.
+                            enableDnsRebindingProtection: true,
+                            allowedHosts: [`127.0.0.1:${httpPort}`, `localhost:${httpPort}`],
+                            allowedOrigins: [
+                                `http://127.0.0.1:${httpPort}`,
+                                `http://localhost:${httpPort}`,
+                            ],
                         });
                         // Registered before handleRequest so a client that
                         // disconnects mid-response cannot be missed.

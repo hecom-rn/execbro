@@ -48,7 +48,7 @@ Returns meaningful component names with text content and frame data (`x, y width
 **Key parameters:**
 
 - `extended=true` — include layout styles (padding, margin, flex, backgroundColor)
-- `componentsOnly=true` — hide host components (View, Text) and show only custom components
+Host components (View, Text) are always filtered out — the tree is custom components only, so there is no switch for it.
 
 **Tip:** Use `tap(text=...)` or `tap(testID=...)` to interact with components discovered in the layout.
 
@@ -115,7 +115,7 @@ Style is the node's own style object, not RN's merged cascade — when a value l
 
 ## get_images
 
-Access the shared image buffer containing screenshots from all tools (`ios_screenshot`, `android_screenshot`, `ocr_screenshot`, tap verification).
+Access the shared image buffer containing screenshots from all tools (`ios_screenshot`, `android_screenshot`, tap verification).
 
 ```
 get_images

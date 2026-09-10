@@ -1,6 +1,6 @@
 {
     "generatedFrom": "toolRegistry",
-    "count": 61,
+    "count": 64,
     "tools": [
         "android_key_event",
         "android_launch_app",
@@ -35,6 +35,7 @@
         "harmony_list_packages",
         "harmony_screenshot",
         "harmony_terminate_app",
+        "http_request",
         "input_text",
         "inspect_at_point",
         "inspect_component",
@@ -47,6 +48,7 @@
         "ios_terminate_app",
         "list_debug_globals",
         "list_devices",
+        "list_secrets",
         "logbox",
         "measure",
         "navigate",
@@ -62,7 +64,8 @@
         "search_network",
         "send_feedback",
         "swipe",
-        "tap"
+        "tap",
+        "vault_capture"
     ],
     "params": {
         "android_key_event": [
@@ -249,6 +252,14 @@
             "bundleName",
             "device"
         ],
+        "http_request": [
+            "auth",
+            "body",
+            "headers",
+            "maxResultLength",
+            "method",
+            "url"
+        ],
         "input_text": [
             "component",
             "device",
@@ -316,6 +327,7 @@
         "list_devices": [
             "refresh"
         ],
+        "list_secrets": [],
         "logbox": [
             "action",
             "device",
@@ -450,6 +462,11 @@
             "verify",
             "x",
             "y"
+        ],
+        "vault_capture": [
+            "device",
+            "expression",
+            "origin"
         ]
     }
 }

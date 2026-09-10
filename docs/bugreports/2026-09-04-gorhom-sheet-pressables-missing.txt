@@ -1,0 +1,154 @@
+FIXED: a Gorhom bottom sheet reported "(no pressables)" while its button was on screen
+=======================================================================================
+
+Status:      fixed 2026-09-05 on branch fix/screen-state-transform-double-compose
+Found:       2026-09-04, on the RN test app (execbro-test-app), Modals screen
+Reproduced:  every time on the Android emulator, and (2026-09-05) on the iOS simulator too.
+
+TWO independent causes, one per platform. Fixing the iOS one left Android still broken,
+which is worth remembering: the symptom was identical on both and it would have shipped as
+a half fix if the emulator check had been skipped.
+
+
+Neither cause is platform-specific code. Both live in the shared fiber walk; each just
+happens to be the one that fires first on the platform named.
+
+
+ROOT CAUSE 1 (the one seen on iOS): the transform was composed into the frame twice
+-----------------------------------------------------------------------------------
+
+get_screen_state composed EVERY transform it found on an element's ancestors into that
+element's measured frame. It should only ever have composed the ones measureInWindow
+cannot see.
+
+measureInWindow reads the shadow tree. A static numeric transform, a JS-driven Animated
+value and a value Reanimated wrote are all committed to the shadow tree, so the measured
+frame ALREADY includes them and adding the translation again double-counts it. Only a
+native-driven Animated value (useNativeDriver: true) is applied straight to the platform
+view and never reaches the shadow tree.
+
+Gorhom holds its sheet open with a plain numeric translateY. Measured on the iOS
+simulator with the 50% sheet open, viewport 420x912pt:
+
+  gorhom-half-close  raw measureInWindow  y = 571    (correct — inside the open sheet)
+                     composed offset      dy = +844
+                     resulting frame      y = 1415   -> off-viewport -> dropped
+
+The 844 is 422 counted twice. `<View style={s}/>` renders an `RCTView` carrying the
+identical style object, so walking `.return` from a host view met the same
+`transform: [{translateY: 422}]` on both the composite fiber and the host it renders.
+
+ROOT CAUSE 2 (the one seen on Android): a style array was read as OR, not as last-wins
+---------------------------------------------------------------------------------------
+
+`isHiddenNavigationScene` asked `isHiddenStyle` of each entry of a style array and OR-ed
+the answers. RN flattens a style array last-wins, so that is a different question, and the
+wrong one: a style array is how a component expresses state, so an entry that hides is
+routinely followed by one that un-hides it.
+
+Gorhom's sheet container ships, with the sheet fully open and on screen:
+
+  [null,
+   {flexDirection:'column-reverse', position:'absolute', top:0, left:0, right:0},
+   {opacity: 0, transform: [{translateY: 923.43}]},        <- closed state
+   {transform: [{translateY: 434.67}], opacity: 1}]        <- open state, overrides it
+
+The `opacity: 0` in the middle pruned the entire subtree, so gorhom-half-close never
+reached fiberMeta at all — the marker was counted as "pruned as hidden by View" and the
+sheet reported itself as containing no pressables.
+
+Confirmed independently by the user's RN element inspector, which selected exactly this
+node: BottomSheetViewComponent > View > RCTView, position absolute, top/left/right 0.
+
+This one was NOT specific to the sheet. isHiddenNavigationScene is the shared visibility
+predicate for every fiber-walk tool, so any component that expresses visibility by
+appending a style override was being pruned while fully visible.
+
+It also explains the two "hard facts" the earlier investigation could not, both of which
+were measured on Android:
+
+  A. Every collected pressable had overlayIdx null. Correct, and not a fault: the walk
+     does descend through the BottomSheet fiber and does set ovIdx there, but everything
+     below it was flagged hidden, so nothing inside the sheet was ever pushed. The only
+     entries left to build the histogram from were the ones outside the sheet.
+
+  B. CLOSE was not in allPressables and not in the geometry-drop list. Correct on both
+     counts: it never reached fiberMeta at all. It was in markerHiddenCount, attributed to
+     "pruned as hidden by View" — but markerSkipped keeps only the first 12, and the parked
+     drawer's routes filled that sample first.
+
+Point 1 of the original report's WHAT IS ALREADY RULED OUT was therefore wrong. It read
+CLOSE's ancestor props looking for a hiding value and found none, because the hiding value
+is not the one that governs — it is overridden later in the same array, which is exactly
+what the predicate failed to notice.
+
+
+THE FIX
+-------
+
+src/core/injected/visibility.ts — isHiddenStyleProp() resolves the `style` prop the way RN
+does (flatten last-wins, arrays may nest) and then asks isHiddenStyle of the result.
+isHiddenNavigationScene delegates to it. Only `display` and `opacity` are merged, which is
+all that predicate reads.
+
+src/core/injected/transformCompose.ts (new) — composeTransformOps() folds one style's
+transform array into an offset, contributing to dx/dy ONLY for a native-driven value.
+Everything else is still inspected: an unreadable value, a non-array transform and a
+non-identity scale/rotate/skew all still set `uncertain`, so the ⚠transformed tag and the
+"kept but off-screen" rule are unchanged.
+
+src/core/screenState.ts — transformStateOf() now calls it instead of summing inline. Its
+two local helpers (animatedValueOf, isNativeDriven) moved into the same file.
+
+Once composition is gated on native-driven, the composite/host double-count cannot
+contribute at all, so no separate de-duplication is needed. An earlier revision of this
+fix added one; it was removed after the device probe below showed it could never fire.
+
+
+WHY THE STICKY HEADER CASE STILL WORKS
+--------------------------------------
+
+The composition was added for a pinned sticky header that sat at y=132pt while
+measureInWindow reported y=-1698pt. That case is preserved: RN attaches the scroll value
+driving sticky headers with AnimatedImplementation.attachNativeEvent (ScrollView.js), so
+it IS native-driven.
+
+Measured on device, walking down from a pinned ScrollViewStickyHeader:
+
+  depth 1  Animated(View)  translateY  object  __isNative: true   __getValue() -> 0
+  depth 2  View            translateY  number                                     0
+  depth 3  RCTView         translateY  number                                     0
+
+Two things worth keeping in mind. First, this is the double-count in the raw: the same
+translation appears at three levels. Second, a native-driven value reads back STALE from
+JS — 0 while the header is pinned — so the composition never actually moved this frame,
+before the fix or after it. The honest output for a sticky header is the ⚠transformed tag
+plus the pre-transform frame, which is exactly what it emits, unchanged.
+
+A sticky header fixture was added to the test app for this (execbro-test-app,
+src/screens/ui/ScrollScreen.tsx, testID sticky-header-btn). There was none before, which
+is why the over-general rule survived its own review.
+
+
+VERIFICATION
+------------
+
+Run on all three targets, execbro-test-app, simultaneously connected:
+
+  - iOS simulator, iPhone Air, RN 0.83 / Fabric
+  - Android emulator, Pixel_9_-_16kb, API 36, Fabric
+  - physical Android, Samsung SM-A346E (Galaxy A34), API 36, over USB
+
+  1. Gorhom 50% sheet open -> get_screen_state lists the button under the BottomSheet
+     group — iOS (461, 1294), emulator (446, 1278), device (462, 1288) — and tapping those
+     coordinates closes the sheet on each, so the frames are real, not merely present.
+  2. RN <Modal> control case unchanged everywhere: only rn-modal-close under the Modal
+     group, the background buttons under Blocked.
+  3. The empty-overlay warning from formatPressabilityAudit no longer fires anywhere.
+  4. Scroll screen with the new sticky header, on all three: kept in the listing, tagged
+     ⚠transformed(sticky header), pre-transform frame — identical before and after.
+
+Unit: src/__tests__/unit/transformCompose.test.ts, plus three cases in visibility.test.ts.
+Full suite 1982 passed / 170 suites.
+
+Every item of the original DEFINITION OF DONE is covered.
