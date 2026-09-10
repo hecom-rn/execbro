@@ -124,7 +124,7 @@ export const platformUniqueBanner = (useCase: string): string =>
     `\n[PLATFORM-SPECIFIC — no cross-platform equivalent; use when ${useCase}]`;
 
 export const primaryInteractionBanner = (): string =>
-    `\n[PRIMARY INTERACTION TOOL — works on iOS and Android; prefer over ios_*/android_* siblings]`;
+    `\n[PRIMARY INTERACTION TOOL — works on iOS, Android, and HarmonyOS; prefer over ios_*/android_*/harmony_* siblings]`;
 
 /**
  * Estimate how many tokens an image will consume in Claude's vision encoder.
