@@ -19,6 +19,9 @@ import { tmpdir } from "os";
 import path from "path";
 import os from "os";
 import { execFileAsync, quoteForDeviceShell } from "./exec.js";
+import { planPinch } from "./pinchGeometry.js";
+import { EDGE_GUARD_PX, SETTLE_MS } from "./pinchThresholds.js";
+import type { TouchPoint } from "./emulatorGrpc.js";
 
 const HDC_TIMEOUT = 30_000;
 
@@ -522,6 +525,147 @@ export async function harmonyInputFocusedText(text: string, targetKey?: string):
     } catch (e) {
         return errFrom(e, "uiInput text");
     }
+}
+
+// --- Multi-touch gestures (raw `uinput -T`) ---
+//
+// `uitest uiInput` has no multi-finger form, but `uinput -T -m` carries up
+// to three fingers in ONE command: it presses both contacts at their start
+// coordinates, smooth-moves them together, and lifts them. That single-
+// command form is the only cross-image one — on the silent DevEco emulator
+// image verified 2026-09-11, separate `-d`/`-m`/`-u` invocations do NOT
+// share touch state (a five-command press/move/lift sequence forms no
+// gesture), while a bare dual-finger `-m` drives real zooms. It is also the
+// help text's own canonical multi-touch example.
+
+export interface HarmonyPinchOptions {
+    /** Focal point in DEVICE pixels. */
+    focalX: number;
+    focalY: number;
+    direction: "in" | "out";
+    scale: number;
+    angleDeg: number;
+    durationMs: number;
+    /** Fraction of the available span the gesture may occupy, 0-1 (default 1). */
+    span?: number;
+}
+
+export interface HarmonyPinchResult {
+    success: boolean;
+    result?: string;
+    error?: string;
+    gestureCount?: number;
+    /** Response-shape parity with AndroidPinchResult: here, the -m move count. */
+    frameCount?: number;
+    startHalf?: number;
+    endHalf?: number;
+}
+
+/**
+ * One `-m` argv (after `shell`) per two-finger sub-gesture: finger 1's start
+ * and end, then finger 2's. The command presses, moves, and lifts by itself,
+ * so a failed or interrupted gesture cannot leave contacts stuck down.
+ */
+export function buildHarmonyPinchCommands(gestures: TouchPoint[][][]): string[][] {
+    const commands: string[][] = [];
+    for (const frames of gestures) {
+        const [c1Start, c2Start] = frames[0];
+        const [c1End, c2End] = frames[frames.length - 1];
+        commands.push([
+            "uinput", "-T", "-m",
+            num(c1Start.x), num(c1Start.y), num(c1End.x), num(c1End.y),
+            num(c2Start.x), num(c2Start.y), num(c2End.x), num(c2End.y)
+        ]);
+    }
+    return commands;
+}
+
+/**
+ * `fingerCount:N` in a `-m` echo reports how many fingers the injection
+ * formed — when the build prints anything. Some uinput builds are fully
+ * silent (no echo, not even the trailing hint line), so an absent count
+ * means "unknown", not "failed". The trailing "If the command does not work
+ * as expected…" line is printed on EVERY invocation where there is output at
+ * all, success included — never treat it as failure.
+ */
+export function parseFingerCount(stdout: string): number | null {
+    const m = stdout.match(/fingerCount:\s*(\d+)/);
+    return m ? Number(m[1]) : null;
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Two-finger pinch via `uinput -T`, one self-contained `-m` per sub-gesture
+ * (multi-touch verified live 2026-09-11: the command zooms a Gallery photo).
+ * durationMs is not applied: the dual-finger `-m` keep/smooth-time parameter
+ * positions are unverified and the verified image echoes nothing to confirm
+ * them, so movement runs at the uinput default smooth time (~1000ms) — a
+ * real pinch is faster, but recognizers do not require it.
+ */
+export async function harmonyPinch(
+    options: HarmonyPinchOptions,
+    targetKey?: string
+): Promise<HarmonyPinchResult> {
+    const missing = await requireHdc();
+    if (missing) return missing;
+    const device = targetKey ?? (await getDefaultHarmonyTarget());
+    if (!device) return { success: false, error: "No HarmonyOS device connected." };
+
+    const size = await harmonyGetScreenSize(device);
+    if (!size) {
+        return { success: false, error: `Could not read the screen size for ${device}.` };
+    }
+
+    const plan = planPinch({
+        focalX: options.focalX,
+        focalY: options.focalY,
+        direction: options.direction,
+        scale: options.scale,
+        angleDeg: options.angleDeg,
+        durationMs: options.durationMs,
+        screenWidth: size.width,
+        screenHeight: size.height,
+        guards: EDGE_GUARD_PX,
+        span: options.span
+    });
+    if (!plan.viable) {
+        return { success: false, error: plan.note ?? "The requested pinch would not be recognised." };
+    }
+
+    const commands = buildHarmonyPinchCommands(plan.gestures);
+    for (let g = 0; g < commands.length; g++) {
+        try {
+            const { stdout } = await runHdc(buildShellArgs(device, commands[g]));
+            // A count in the echo is evidence — reject a wrong one. Some
+            // uinput builds print nothing at all (verified 2026-09-11):
+            // there, exit code 0 is all the signal hdc gives, and the
+            // tool's screenshot diff is what catches a silent no-op.
+            const fingers = parseFingerCount(stdout);
+            if (fingers !== null && fingers !== 2) {
+                throw new Error(
+                    `uinput -m reported fingerCount:${fingers}, expected 2 — ` +
+                    "the two-finger gesture did not form on the device."
+                );
+            }
+            // Let the recognizer commit this gesture before the next lands.
+            if (g < commands.length - 1) await sleep(SETTLE_MS);
+        } catch (e) {
+            return errFrom(e, "uinput pinch");
+        }
+    }
+
+    return {
+        success: true,
+        result:
+            `Pinched ${options.direction} at (${Math.round(options.focalX)}, ${Math.round(options.focalY)}) ` +
+            `over ${plan.gestures.length} gesture(s); movement ran at the uinput default smooth time ` +
+            `(~1000ms — durationMs is not applied on harmony)`,
+        gestureCount: plan.gestures.length,
+        frameCount: plan.gestures.length,
+        startHalf: plan.startHalf,
+        endHalf: plan.endHalf
+    };
 }
 
 export async function harmonyLaunchApp(

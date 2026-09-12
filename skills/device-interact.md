@@ -1,6 +1,6 @@
 # Device Interact Skill
 
-Interact with running iOS simulators and Android emulators/devices: tap, swipe, pinch to zoom (Android emulator only — iOS in progress), type text, press buttons, and navigate the app UI.
+Interact with running iOS simulators and Android emulators/devices: tap, swipe, pinch to zoom (Android emulator + HarmonyOS over hdc — iOS in progress), type text, press buttons, and navigate the app UI.
 
 ## When to Trigger
 
@@ -143,14 +143,14 @@ Use `maxTraversalDepth` when `tap(component=...)` fails because the component is
 - `burst:true` catches overscroll/bounce that settles before the after-frame; `verify:false, screenshot:false` is the fastest path
 - It drives the device through adb/simctl, so it works on non-RN screens too — only the no-op diagnosis needs a React Native connection
 
-**Pinch to zoom** — `mcp__execbro__pinch`. **Android emulator only; iOS in progress.**
+**Pinch to zoom** — `mcp__execbro__pinch`. **Android emulator + HarmonyOS over hdc; iOS in progress.**
 - `pinch(direction="out")` zooms in at screen centre, `direction="in"` zooms out
 - `pinch(direction="out", x=..., y=...)` pivots the zoom on a point (screenshot pixels — the same space as `tap`)
 - `scale` is the finger-separation ratio; values too large for one gesture chain automatically
 - `angle=90` puts the fingers on the vertical axis
 - Read `verification.meaningful` exactly as with `swipe`
 - `span` is how much of the screen the gesture occupies — 1 by default for `"out"`, 0.5 for `"in"`, because a pinch-in starts with the fingers far apart and a full span would land them on a top bar or bottom sheet. Lower it further if a gesture still lands on surrounding UI
-- It sends real kernel touch events, so it drives native views, WebViews, and maps — not only React Native. Physical Android devices and iOS return an explicit error rather than a partial result
+- It sends real kernel touch events, so it drives native views, WebViews, and maps — not only React Native. Physical Android devices and iOS return an explicit error rather than a partial result. On HarmonyOS `durationMs` is not applied — movement runs at the uinput default (~1s)
 
 **Type text** — `mcp__execbro__input_text`, cross-platform:
 - Give it a `testID` and it focuses the field itself, types, then reads the value back and compares it, so a silent miss is reported rather than assumed

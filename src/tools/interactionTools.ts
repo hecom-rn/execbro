@@ -49,7 +49,7 @@ import { PINCH_IN_DEFAULT_SPAN } from "../core/pinchThresholds.js";
 import { resolveAndroidDeviceId, resolveIosUdid, resolveHarmonyTargetKey, ANDROID_ARG_DESC, IOS_ARG_DESC } from "./_deviceArg.js";
 import type { ConnectedApp } from "../core/types.js";
 import type { DevicePlatform } from "../core/types.js";
-import { harmonyKeyEvent, HARMONY_KEY_EVENTS } from "../core/harmony.js";
+import { harmonyKeyEvent, harmonyPinch, HARMONY_KEY_EVENTS } from "../core/harmony.js";
 import { readKeyboardState } from "../core/keyboardMetrics.js";
 
 /**
@@ -654,13 +654,13 @@ export function registerInteractionTools(server: McpServer): void {
         "pinch",
         {
             description:
-                "Pinch-to-zoom using REAL two-finger touch events, with pixel-diff verification. ANDROID EMULATOR ONLY (iOS in progress; HarmonyOS not supported).\n" +
+                "Pinch-to-zoom using REAL two-finger touch events, with pixel-diff verification. Works on the ANDROID EMULATOR and on HARMONYOS targets (raw `hdc shell uinput -T` multi-touch); iOS in progress.\n" +
                 "PURPOSE: Zoom a map, image gallery, photo viewer, or any zoomable surface. pinch({ direction: \"out\" }) zooms in at screen centre; \"in\" zooms out. Pass x/y to zoom around a specific point.\n" +
                 "HOW IT WORKS: Two independent contacts sent through the emulator's multi-touch bridge as real kernel touch events. It works below the app, so it drives React Native, native views, WebViews — anything on screen.\n" +
                 "VERIFICATION: verify=true (default) returns `verification.meaningful` — false means nothing zoomed (not zoomable, already at a zoom limit, or the focal point missed).\n" +
                 "WORKFLOW: pinch({ direction: \"out\" }) -> read verification.meaningful. Take x/y from get_screen_state or a screenshot; no conversion needed.\n" +
                 "IF A GESTURE DOES NOTHING: lower `span` — the contacts may be landing on surrounding UI (a top bar, a bottom sheet) rather than the zoomable surface. direction=\"in\" already defaults to a reduced span for this reason.\n" +
-                "LIMITATIONS: Physical Android devices and iOS have no multi-touch channel and return an explicit error, never a partial result. Success means real fingers moved — this never fakes zoom by calling app code.\n",
+                "LIMITATIONS: Physical Android devices and iOS have no multi-touch channel and return an explicit error, never a partial result. On HarmonyOS durationMs is not applied — movement runs at the uinput default (~1s). Success means real fingers moved — this never fakes zoom by calling app code.\n",
             inputSchema: {
                 direction: z
                     .enum(["in", "out"])
@@ -753,22 +753,18 @@ export function registerInteractionTools(server: McpServer): void {
                 };
             }
 
-            if (resolved.target.platform !== "android") {
-                const perPlatform = resolved.target.platform === "harmony"
-                    ? "Error: pinch is not available on HarmonyOS. uinput's pinch injection silently no-ops on " +
-                      "the emulator (verified on device 2026-09-02), and per-finger injection through separate " +
-                      "uinput sessions cannot form one gesture. A UiDriver (ArkXTest) harness is the likely path."
-                    : "Error: pinch is not available on iOS yet. Multi-touch on the iOS simulator needs an " +
-                      "Indigo HID helper that does not ship in any released idb build; it is planned as a " +
-                      "follow-up. Android emulators are supported today.";
+            if (resolved.target.platform === "ios") {
                 return {
                     content: [{
                         type: "text",
-                        text: perPlatform,
+                        text: "Error: pinch is not available on iOS yet. Multi-touch on the iOS simulator needs an " +
+                          "Indigo HID helper that does not ship in any released idb build; it is planned as a " +
+                          "follow-up. Android emulators are supported today.",
                     }],
                     isError: true,
                 };
             }
+            const pinchPlatform = resolved.target.platform;
 
             const shouldVerify = verify !== false;
             const shouldScreenshot = screenshot !== false;
@@ -778,7 +774,7 @@ export function registerInteractionTools(server: McpServer): void {
             // a default focal point.
             const wantBefore = shouldVerify || shouldBurst || x === undefined || y === undefined;
             const beforeCapture = wantBefore
-                ? await captureScreenshot("android", undefined, resolved.target.androidSerial)
+                ? await captureScreenshot(pinchPlatform, undefined, resolved.target.androidSerial, resolved.target.harmonyTargetKey)
                 : null;
 
             if ((x === undefined || y === undefined) && (!beforeCapture || !beforeCapture.width || !beforeCapture.height)) {
@@ -809,7 +805,7 @@ export function registerInteractionTools(server: McpServer): void {
             const focal = convertScreenshotToTapCoords(
                 focalScreenshotX,
                 focalScreenshotY,
-                "android",
+                pinchPlatform,
                 1,
                 pinchScaleFactor
             );
@@ -820,16 +816,26 @@ export function registerInteractionTools(server: McpServer): void {
             const effectiveSpan =
                 span ?? ((direction ?? "out") === "in" ? PINCH_IN_DEFAULT_SPAN : 1);
 
-            const driverResult = await androidPinch({
-                focalX: focal.x,
-                focalY: focal.y,
-                direction: (direction ?? "out") as "in" | "out",
-                scale: scale ?? 3,
-                angleDeg: angle ?? 0,
-                durationMs: durationMs ?? SWIPE_DEFAULT_DURATION_MS,
-                span: effectiveSpan,
-                serial: resolved.target.androidSerial,
-            });
+            const driverResult = pinchPlatform === "harmony"
+                ? await harmonyPinch({
+                    focalX: focal.x,
+                    focalY: focal.y,
+                    direction: (direction ?? "out") as "in" | "out",
+                    scale: scale ?? 3,
+                    angleDeg: angle ?? 0,
+                    durationMs: durationMs ?? SWIPE_DEFAULT_DURATION_MS,
+                    span: effectiveSpan,
+                }, resolved.target.harmonyTargetKey)
+                : await androidPinch({
+                    focalX: focal.x,
+                    focalY: focal.y,
+                    direction: (direction ?? "out") as "in" | "out",
+                    scale: scale ?? 3,
+                    angleDeg: angle ?? 0,
+                    durationMs: durationMs ?? SWIPE_DEFAULT_DURATION_MS,
+                    span: effectiveSpan,
+                    serial: resolved.target.androidSerial,
+                });
 
             if (!driverResult.success) {
                 return {
@@ -840,20 +846,22 @@ export function registerInteractionTools(server: McpServer): void {
 
             const verifyResult = shouldBurst
                 ? await burstCaptureAndVerify({
-                    platform: "android",
+                    platform: pinchPlatform,
                     beforeBuffer: beforeCapture?.buffer ?? null,
                     udid: undefined,
                     deviceId: resolved.target.androidSerial,
+                    hdcKey: resolved.target.harmonyTargetKey,
                     beforeScaleFactor: beforeCapture?.scaleFactor,
                     source: "pinch-burst",
                 })
                 : await verifyAndCapture({
-                    platform: "android",
+                    platform: pinchPlatform,
                     shouldVerify,
                     shouldScreenshot,
                     beforeBuffer: beforeCapture?.buffer ?? null,
                     udid: undefined,
                     deviceId: resolved.target.androidSerial,
+                    hdcKey: resolved.target.harmonyTargetKey,
                     beforeScaleFactor: beforeCapture?.scaleFactor,
                     source: "pinch-verify",
                 });
@@ -867,7 +875,7 @@ export function registerInteractionTools(server: McpServer): void {
 
             const responseBody: Record<string, unknown> = {
                 success: true,
-                platform: "android",
+                platform: pinchPlatform,
                 direction: direction ?? "out",
                 focal: { x: focalScreenshotX, y: focalScreenshotY },
                 span: effectiveSpan,

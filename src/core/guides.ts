@@ -230,8 +230,8 @@ whether you flipped the right row or the one above it, so the value is the only 
 those apart. changed:false with a warning means the gesture landed but the value did not move —
 a disabled switch, a controlled one whose parent rejected the change, or a miss.
 
-## Pinch to Zoom (Android emulator only — iOS in progress)
-pinch sends REAL two-finger touch events through the Android emulator's multi-touch bridge, so it drives anything on screen — React Native, native views, WebViews, maps:
+## Pinch to Zoom (Android emulator + HarmonyOS via hdc — iOS in progress)
+pinch sends REAL two-finger touch events — through the Android emulator's multi-touch bridge, or through raw \`hdc shell uinput -T\` on HarmonyOS — so it drives anything on screen — React Native, native views, WebViews, maps:
 1. pinch(direction="out") — fingers spread apart, zooms IN at screen centre
 2. pinch(direction="in") — fingers converge, zooms OUT
 3. pinch(direction="out", x=..., y=...) — zoom pivots on that point (screenshot pixels, same space as tap and get_screen_state)
@@ -245,7 +245,7 @@ Read verification.meaningful, exactly like swipe: false means nothing zoomed (su
 span is the fraction of the available screen the gesture occupies. It defaults to 1 for direction="out" and 0.5 for direction="in", because a pinch-in STARTS with the fingers far apart — a full span would land its contacts at the screen extremes, where a top bar or a bottom sheet takes the gesture before the zoomable surface sees it. Lower span further if a gesture still lands on surrounding UI; raise it to zoom out further in one gesture. It does not change the zoom ratio (that is scale).
 
 ### Platform support
-Android emulators only. Physical Android devices have no gRPC bridge, and iOS needs a multi-touch HID helper that no released idb ships — both return an explicit error rather than a partial result. pinch never fakes a zoom by calling app code: success means real fingers moved.
+Android emulators and HarmonyOS targets (emulator or device over hdc). Physical Android devices have no gRPC bridge, and iOS needs a multi-touch HID helper that no released idb ships — both return an explicit error rather than a partial result. On HarmonyOS the fingers move through \`uinput -T -m\`; where the device echoes a \`fingerCount\`, the driver rejects a count that is not 2, and on silent uinput builds the pixel-diff verification is what catches a no-op. durationMs is not applied — movement runs at the uinput default (~1s). pinch never fakes a zoom by calling app code: success means real fingers moved.
 
 ## Best Practice: Use testID
 Set testID on all interactive elements (buttons, inputs, links) for reliable tapping:
