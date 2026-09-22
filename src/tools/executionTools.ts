@@ -63,6 +63,17 @@ export function registerExecutionTools(server: McpServer): void {
                     .default(false)
                     .describe("Disable result truncation. Tip: Be cautious - Redux stores or large state can return 10KB+."),
                 device: z.string().optional().describe(DEVICE_ARG_DESC),
+                // Aliases, accepted and never advertised anywhere else. The
+                // refusals this tool logs arrive with NO arguments at all: not
+                // `expression`, not `device`, not `timeoutMs` — the shape a
+                // call gets when the JavaScript was sent under a key the schema
+                // does not declare, because an undeclared key is stripped
+                // before the handler sees it. 29 refusals across 15 separate
+                // installations in the week to 2026-09-19, every one of them
+                // empty-handed. Declaring the two obvious names costs nothing
+                // and turns that call into the one the caller meant.
+                code: z.string().optional().describe("Alias for `expression`."),
+                script: z.string().optional().describe("Alias for `expression`."),
                 timeoutMs: z.coerce
                     .number()
                     .optional()
@@ -71,7 +82,8 @@ export function registerExecutionTools(server: McpServer): void {
                     )
             }
         },
-        async ({ expression, collect, awaitPromise, maxResultLength, verbose, device, timeoutMs, waitMs }) => {
+        async ({ expression: expressionArg, code, script, collect, awaitPromise, maxResultLength, verbose, device, timeoutMs, waitMs }) => {
+            const expression = expressionArg ?? code ?? script;
             if (collect) {
                 // Poll server-side for up to waitMs. Without this the only way to
                 // wait for a slow promise was to burn turns re-calling collect.
@@ -127,7 +139,8 @@ export function registerExecutionTools(server: McpServer): void {
                             " The only alternative is `collect` with a deferred promise handle from an earlier call." +
                             (passed.length > 0 ? ` Received only: ${passed.join(", ")}.` : " Neither was present in this call.")
                     }],
-                    isError: true
+                    isError: true,
+                    _failureKind: "bad_arguments" as const
                 };
             }
 
@@ -164,7 +177,15 @@ export function registerExecutionTools(server: McpServer): void {
                     ],
                     isError: true,
                     // Include expression as context for telemetry (helps debug syntax errors)
-                    _errorContext: expression
+                    _errorContext: expression,
+                    // The expression here is the CALLER's, so an exception from
+                    // it is not a defect in this tool. Forwarded only from this
+                    // handler for that reason: everywhere else the evaluated
+                    // source is ours. 73 of execute_in_app's 156 failures in
+                    // the 8 days after 2.9.6 were one install's own debug
+                    // helper throwing, which read as a 89.7% success rate for a
+                    // tool that was doing exactly what it was asked.
+                    ...(result.failureKind && { _failureKind: result.failureKind })
                 };
             }
 

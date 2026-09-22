@@ -46,6 +46,30 @@ describe("session verdict freeze", () => {
         expect(isToolBlocked("activate_license").blocked).toBe(false);
     });
 
+    it("connect path stays open over cap so the banner has a channel", () => {
+        freezeSessionVerdict(usage({ used: 600, canUse: false }));
+        for (const tool of ["ensure_connection", "connect_metro", "scan_metro", "get_connection_status", "list_devices"]) {
+            expect(isToolBlocked(tool).blocked).toBe(false);
+        }
+    });
+
+    it("connecting buys nothing: tools that read or drive the app stay blocked", () => {
+        freezeSessionVerdict(usage({ used: 600, canUse: false }));
+        for (const tool of ["tap", "get_logs", "execute_in_app", "get_screen_state", "ios_screenshot"]) {
+            expect(isToolBlocked(tool).blocked).toBe(true);
+        }
+    });
+
+    // The verdict shape the server has returned to every install since the cap
+    // was retired on 2026-09-15: limit null, capActive true (NOT the deferral
+    // shape, which the client reads as "a cap is coming").
+    it("uncapped verdict (limit:null) blocks nothing, however high the count", () => {
+        freezeSessionVerdict(usage({ used: 10_000, limit: null, canUse: true, capActive: true }));
+        expect(isToolBlocked("tap").blocked).toBe(false);
+        expect(isToolBlocked("execute_in_app").blocked).toBe(false);
+        expect(usageWarningLine(usage({ used: 10_000, limit: null }))).toBeNull();
+    });
+
     it("deferred user (capActive:false) never blocked", () => {
         freezeSessionVerdict(usage({ used: 900, capActive: false, canUse: true }));
         expect(isToolBlocked("tap").blocked).toBe(false);
