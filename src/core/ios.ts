@@ -530,13 +530,6 @@ export async function getActiveOrBootedSimulatorUdid(): Promise<string | null> {
 }
 
 /**
- * Build device selector for simctl command
- */
-function buildDeviceArg(udid?: string): string {
-  return udid || "booted";
-}
-
-/**
  * Take a screenshot from an iOS simulator
  */
 export async function iosScreenshot(
@@ -563,9 +556,7 @@ export async function iosScreenshot(
     }
 
     // Generate output path if not provided
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const finalOutputPath =
-      outputPath || path.join(os.tmpdir(), `ios-screenshot-${timestamp}.png`);
+    const finalOutputPath = outputPath || defaultScreenshotPath();
 
     await execFileAsync(
       "xcrun",
@@ -575,46 +566,71 @@ export async function iosScreenshot(
       },
     );
 
-    // Resize image if needed (API limit: 2000px max for multi-image requests)
-    // Return scale factor so AI can convert image coords to device coords
-    const MAX_DIMENSION = 2000;
-    const image = sharp(finalOutputPath);
-    const metadata = await image.metadata();
-    const originalWidth = metadata.width || 0;
-    const originalHeight = metadata.height || 0;
-
-    let imageData: Buffer;
-    let scaleFactor = 1;
-
-    if (originalWidth > MAX_DIMENSION || originalHeight > MAX_DIMENSION) {
-      // Calculate scale to fit within MAX_DIMENSION
-      scaleFactor = Math.max(originalWidth, originalHeight) / MAX_DIMENSION;
-
-      imageData = await image
-        .resize(MAX_DIMENSION, MAX_DIMENSION, {
-          fit: "inside",
-          withoutEnlargement: true,
-        })
-        .jpeg({ quality: 85 })
-        .toBuffer();
-    } else {
-      imageData = await image.jpeg({ quality: 85 }).toBuffer();
-    }
-
-    return {
-      success: true,
-      result: finalOutputPath,
-      data: imageData,
-      scaleFactor,
-      originalWidth,
-      originalHeight,
-    };
+    return await finalizeScreenshotFile(finalOutputPath);
   } catch (error) {
     return {
       success: false,
       error: `Failed to capture screenshot: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+}
+
+/**
+ * Default path for a capture the caller did not name.
+ *
+ * Shared so the simulator and physical-device paths cannot drift into two
+ * different temp-file conventions.
+ */
+export function defaultScreenshotPath(prefix = "ios-screenshot"): string {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return path.join(os.tmpdir(), `${prefix}-${timestamp}.png`);
+}
+
+/**
+ * Turn a captured PNG on disk into the iOSResult the tools return.
+ *
+ * Split out of iosScreenshot so the physical-device path (pymobiledevice3 over
+ * usbmux) produces byte-identical output to the simulator path — the downscale
+ * factor in particular is what every coordinate-consuming tool trusts, so two
+ * copies of it is the one thing that must not happen here.
+ */
+export async function finalizeScreenshotFile(
+  finalOutputPath: string,
+): Promise<iOSResult> {
+  // Resize image if needed (API limit: 2000px max for multi-image requests)
+  // Return scale factor so AI can convert image coords to device coords
+  const MAX_DIMENSION = 2000;
+  const image = sharp(finalOutputPath);
+  const metadata = await image.metadata();
+  const originalWidth = metadata.width || 0;
+  const originalHeight = metadata.height || 0;
+
+  let imageData: Buffer;
+  let scaleFactor = 1;
+
+  if (originalWidth > MAX_DIMENSION || originalHeight > MAX_DIMENSION) {
+    // Calculate scale to fit within MAX_DIMENSION
+    scaleFactor = Math.max(originalWidth, originalHeight) / MAX_DIMENSION;
+
+    imageData = await image
+      .resize(MAX_DIMENSION, MAX_DIMENSION, {
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .jpeg({ quality: 85 })
+      .toBuffer();
+  } else {
+    imageData = await image.jpeg({ quality: 85 }).toBuffer();
+  }
+
+  return {
+    success: true,
+    result: finalOutputPath,
+    data: imageData,
+    scaleFactor,
+    originalWidth,
+    originalHeight,
+  };
 }
 
 /**
@@ -801,9 +817,25 @@ export async function iosTerminateApp(
       result: `Terminated ${bundleId}`,
     };
   } catch (error) {
+    // simctl exits 3 with "found nothing to terminate" when the app is not
+    // running. The caller asked for the app to be stopped and it is stopped,
+    // so this is the outcome they wanted, not a failure: 13 of the 13
+    // ios_terminate_app failures in the week to 2026-09-19 were this, and
+    // every one of them was an app that had already exited. simctl gives the
+    // same error for a bundle id that is not installed at all, which is why
+    // the result says plainly that nothing was running rather than claiming a
+    // termination happened.
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("found nothing to terminate")) {
+      return {
+        success: true,
+        result: `${bundleId} was not running (nothing to terminate). If you expected it to be running, check the bundle id.`,
+      };
+    }
+
     return {
       success: false,
-      error: `Failed to terminate app: ${error instanceof Error ? error.message : String(error)}`,
+      error: `Failed to terminate app: ${message}`,
     };
   }
 }

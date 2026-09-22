@@ -17,6 +17,7 @@ import { getConnectedApps } from "../core/connection.js";
 import { resolveAndroidDeviceId, resolveIosUdid, ANDROID_ARG_DESC, IOS_ARG_DESC } from "./_deviceArg.js";
 import { harmonyLaunchApp, harmonyListPackages, harmonyTerminateApp } from "../core/harmony.js";
 import { resolveHarmonyTargetKey } from "./_deviceArg.js";
+import { listPhysicalIosDevices } from "../core/iosPhysical.js";
 
 export function registerDeviceTools(server: McpServer): void {
     // ============================================================================
@@ -102,6 +103,17 @@ export function registerDeviceTools(server: McpServer): void {
                 }
             } else {
                 lines.push(`\niOS: unavailable (${inventory.ios.error ?? "unknown"})`);
+            }
+
+            // Physical iPhones/iPads are invisible to simctl, so they need their
+            // own probe. Listed as capture-only on purpose: ios_screenshot reaches
+            // them, every interaction tool does not.
+            const physicalIos = await listPhysicalIosDevices();
+            if (physicalIos.length > 0) {
+                lines.push("\niOS physical (screenshot only — no tap/swipe/input_text):");
+                for (const d of physicalIos) {
+                    lines.push(`  ${d.name} — iOS ${d.version} (${d.productType}) — UDID: ${d.udid}`);
+                }
             }
 
             if (inventory.android.available) {

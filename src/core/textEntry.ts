@@ -7,6 +7,7 @@ import {
     recordScreen,
     type StalenessVerdict
 } from "./screenStaleness.js";
+import { scriptOf } from "./typedTextVerify.js";
 
 export type EnterTextArgs = {
     /** The text to write. */
@@ -193,6 +194,21 @@ export function keyboardTypeNote(keyboardType: string | null, text: string): str
  */
 export function diagnoseMismatch(sent: string, landed: string | null): string {
     if (landed === null) return "";
+    // Plain ASCII went out and another script came back: the keystrokes were
+    // re-mapped by the simulator's ACTIVE keyboard layout, which is the one
+    // cause that looks nothing like a field bug and reads exactly like one.
+    // The HID path types US keycodes; a Cyrillic layout turns "testing" into
+    // "Еуіештп" with no error anywhere. Telemetry for the week to 2026-09-19:
+    // 6 of the 71 input_text failures, every one of them a bare "landed
+    // differently" that named no cause. typedTextVerify already says this on
+    // the type-and-verify path — the same evidence was simply unreachable here.
+    const remapped = scriptOf(landed);
+    if (remapped !== null && !/[^\u0000-\u007F]/u.test(sent)) {
+        return ` — the keystrokes were re-mapped into ${remapped}, which is the simulator's active keyboard` +
+            ` layout interpreting US keycodes. Nothing is wrong with the field. Switch the simulator to a` +
+            ` Latin keyboard layout — the keystrokes only go through one when the React write path is` +
+            ` unavailable (native:true, or no fiber tree reachable)`;
+    }
     if (landed !== sent && landed.toLowerCase() === sent.toLowerCase()) {
         return " — only the capitalisation differs, which is the field's keyboard transforming input" +
             " (RN TextInput defaults autoCapitalize to 'sentences'); set autoCapitalize=\"none\" to type verbatim";
@@ -444,7 +460,7 @@ export async function enterText(args: EnterTextArgs, deps: TextEntryDeps): Promi
                 last = undefined;
                 continue;
             }
-            const hit = resolveWrittenField(nativeBefore, after.fields, target.testID);
+            const hit = resolveWrittenField(nativeBefore, after.fields, target.testID, args.text);
             if (hit?.secure === true) {
                 maskedField = true;
                 return undefined;
@@ -457,10 +473,17 @@ export async function enterText(args: EnterTextArgs, deps: TextEntryDeps): Promi
 
     // HID appends at the caret, so a replace must clear first or it concatenates.
     // A masked field's prior text is unreadable, so "it looked empty" is not
-    // evidence that it was: a replace must clear it anyway or it appends.
+    // evidence that it was: a replace must clear it anyway or it appends. The
+    // same holds whenever the prior text could not be read AT ALL — an
+    // uncontrolled iOS field the accessibility tree could not resolve leaves
+    // `previous` empty because nothing was read, not because the field was
+    // empty, and skipping the clear on that turned replace into append. Seen in
+    // the field: repeated replace:true calls building up
+    // "Border WidthRadiusRadius XlXlRadius Xl" in one search box. Clearing a
+    // field that really was empty costs one no-op call.
     const needsClearFirst =
         args.replace === true && !target.controlled && target.hasOnChangeText &&
-        isHidTypeable(args.text) && (previous.length > 0 || maskedField);
+        isHidTypeable(args.text) && (!previousKnown || previous.length > 0 || maskedField);
     if (needsClearFirst) await deps.runOp({ kind: "clear" }, opQuery, args.device);
 
     const first = await write(needsClearFirst);
@@ -512,10 +535,20 @@ export async function enterText(args: EnterTextArgs, deps: TextEntryDeps): Promi
         landed !== undefined && landed !== null &&
         landed.length === target.maxLength &&
         desired.length > target.maxLength;
+    // An append onto a field whose prior text could not be read: `desired` is a
+    // PREDICTION made from an empty starting point, so the write landing
+    // correctly still reads as a mismatch against it. The tail is what proves
+    // it — the same rule typedTextVerify applies to the native HID path. Left
+    // to the retry, this CLEARS the field (HID appends at the caret, so the
+    // retry must clear) and destroys exactly the text the caller asked to
+    // append to, then reports the truncated result as verified.
+    const appendedOntoUnknown =
+        !previousKnown && args.replace !== true && typeof landed === "string" &&
+        args.text.length > 0 && landed.endsWith(args.text);
     // A decorated value is the write having landed, not having gone wrong, so
     // it must not burn the retry either — rewriting only makes the field
     // decorate it again.
-    if (landed !== desired && !isFieldTransform(desired, landed) && !atMaxLength) {
+    if (landed !== desired && !isFieldTransform(desired, landed) && !atMaxLength && !appendedOntoUnknown) {
         retried = true;
         // Clear only for HID, which appends at the caret. The other paths set
         // the whole value, so a clear is redundant — and actively harmful:
@@ -537,6 +570,18 @@ export async function enterText(args: EnterTextArgs, deps: TextEntryDeps): Promi
             return { success: false, path: second.path, retried, error: second.error ?? "rewrite failed" };
         }
         landed = await readBack();
+    }
+
+    if (appendedOntoUnknown && landed !== desired) {
+        const keyboard = await deps.raise();
+        return {
+            success: true,
+            ...(kbNote ? { note: kbNote } : {}),
+            value: landed ?? undefined,
+            path: first.path,
+            verified: true,
+            keyboard
+        };
     }
 
     // The field holds what it was asked to hold, plus its own formatting. The
