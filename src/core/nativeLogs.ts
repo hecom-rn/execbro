@@ -40,7 +40,7 @@ export function identityFromApp(
     deviceKeyOverride?: string
 ): AppIdentity | undefined {
     const deviceKey = deviceKeyOverride ?? deviceKeyOf(app);
-    if (!deviceKey || !app.deviceInfo.appId) return undefined;
+    if (!deviceKey || !app.deviceInfo.appId || app.platform === "chromium") return undefined;
     return { deviceKey, platform: app.platform, appId: app.deviceInfo.appId };
 }
 
@@ -187,8 +187,11 @@ async function matchAndroidAppBySerial(
  * no log stream to read.
  */
 export async function resolveLogTargets(device?: string): Promise<LogTarget[]> {
+    // Native (execbro-sdk-android) apps always carry adbSerial and would win the
+    // serial lookup over an RN app on the same device; log identity is the RN app's.
+    const cdpApps = [...connectedApps.values()].filter((app) => app.runtime !== "native");
     const connected = new Map<string, ConnectedApp>();
-    for (const app of connectedApps.values()) {
+    for (const app of cdpApps) {
         const key = deviceKeyOf(app);
         if (key) connected.set(key, app);
     }
@@ -223,7 +226,7 @@ export async function resolveLogTargets(device?: string): Promise<LogTarget[]> {
         // must be keyed by row.deviceKey, not recomputed from the app itself.
         let matchedByModel = false;
         if (!app && row.platform === "android") {
-            app = await matchAndroidAppBySerial(row.deviceKey, [...connectedApps.values()]);
+            app = await matchAndroidAppBySerial(row.deviceKey, cdpApps);
             matchedByModel = app !== undefined;
         }
         const deviceName = app?.deviceInfo.deviceName || row.name || row.deviceKey;

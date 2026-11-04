@@ -13,13 +13,58 @@ import {
 } from "../core/index.js";
 import { platformUniqueBanner } from "../core/toolHelpers.js";
 import { listAllDevices } from "../core/deviceDiscovery.js";
-import { getConnectedApps } from "../core/connection.js";
+import { getConnectedApps, connectToDevice } from "../core/connection.js";
+import { isPortOpen } from "../core/metro.js";
+import { planElectronLaunch, launchElectron } from "../core/electronLaunch.js";
+import { basename } from "path";
+import { homedir } from "os";
 import { resolveAndroidDeviceId, resolveIosUdid, ANDROID_ARG_DESC, IOS_ARG_DESC } from "./_deviceArg.js";
 import { harmonyLaunchApp, harmonyListPackages, harmonyTerminateApp } from "../core/harmony.js";
 import { resolveHarmonyTargetKey } from "./_deviceArg.js";
 import { listPhysicalIosDevices } from "../core/iosPhysical.js";
 
 export function registerDeviceTools(server: McpServer): void {
+    // Tool: start an Electron project with its CDP port open (chromium target)
+    registerToolWithTelemetry(
+        server,
+        "electron_launch_app",
+        {
+            description:
+                "Start an Electron project from its source folder with the Chrome DevTools port open, then connect to its windows. No change to the app is needed.\n" +
+                "PURPOSE: Zero-config desktop debugging. After it returns, the windows are connected as chromium targets: get_screen_state, screenshot, tap, input_text, logs, network and component inspection work on them.\n" +
+                "HOW: electron-vite projects run `electron-vite dev --remoteDebuggingPort <port>`, others `electron . --remote-debugging-port=<port>`, using the project's own installed binary.\n" +
+                "SAFETY: only a source folder is launched, so the app runs unpackaged. A packaged .app is refused: a CDP port on a packaged build lets anything that reaches it run code in the app.\n" +
+                "GOOD: electron_launch_app({ projectPath: \"~/code/myapp/apps/desktop\" })\n" +
+                "An app that pins its own port with appendSwitch('remote-debugging-port') is followed to that port (read from Chromium's startup line).\n" +
+                "LIMITATIONS: Electron Forge and custom dev scripts are not detected.",
+            inputSchema: {
+                projectPath: z.string().describe("The Electron project's source folder (the one with package.json). A leading ~ is expanded."),
+                port: z.coerce.number().int().min(1024).max(65535).optional().default(9222).describe("CDP port to open (default 9222). Must be free."),
+                timeoutMs: z.coerce.number().int().min(1000).max(600000).optional().default(60000).describe("How long to wait for the first window (default 60000; electron-vite compiles first)."),
+            },
+        },
+        async ({ projectPath, port, timeoutMs }) => {
+            const fail = (text: string) => ({ content: [{ type: "text" as const, text }], isError: true as const });
+            const plan = planElectronLaunch(projectPath.replace(/^~(?=\/|$)/, homedir()), port);
+            if ("error" in plan) return fail(plan.error);
+            if (await isPortOpen(port)) {
+                return fail(`Port ${port} is already in use. If it is this app, connect_metro({ port: ${port} }) attaches to it; otherwise pick another port.`);
+            }
+            const r = await launchElectron(plan, port, timeoutMs);
+            if (!r.ok) return fail(`${r.error}\n\nLog: ${r.logPath}`);
+            const moved = r.port !== port ? ` (the app sets its own port with appendSwitch, which overrides ${port})` : "";
+            const lines = [`Launched ${basename(plan.cwd)} with ${plan.runner} (pid ${r.pid}), CDP on 127.0.0.1:${r.port}${moved}. Log: ${r.logPath}`];
+            for (const d of r.devices) {
+                try {
+                    lines.push(`  - ${await connectToDevice(d, r.port)}`);
+                } catch (error) {
+                    lines.push(`  - ${d.deviceName ?? d.title}: Failed - ${error}`);
+                }
+            }
+            lines.push(`Stop it with: kill -- -${r.pid}`);
+            return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+        }
+    );
     // ============================================================================
 
     // Tool: List all devices (cross-platform, works without React Native)
@@ -161,6 +206,10 @@ export function registerDeviceTools(server: McpServer): void {
         }
     );
 
+    // The launch returns before a dev build has a JS runtime; reading the screen or Metro
+    // right away is how a still-loading bundle got reported as "Metro isn't running".
+    const LAUNCH_ATTACH_HINT = "\nA React Native dev build attaches to Metro only after its bundle loads, which can take a minute on a cold start. ensure_connection({ waitMs: 60000 }) returns once it has.";
+
     // Tool: Android launch app
     registerToolWithTelemetry(
         server,
@@ -193,7 +242,7 @@ export function registerDeviceTools(server: McpServer): void {
                 content: [
                     {
                         type: "text",
-                        text: result.success ? result.result! : `Error: ${result.error}`
+                        text: result.success ? result.result! + LAUNCH_ATTACH_HINT : `Error: ${result.error}`
                     }
                 ],
                 isError: !result.success
@@ -348,7 +397,7 @@ export function registerDeviceTools(server: McpServer): void {
                 content: [
                     {
                         type: "text",
-                        text: result.success ? result.result! : `Error: ${result.error}`
+                        text: result.success ? result.result! + LAUNCH_ATTACH_HINT : `Error: ${result.error}`
                     }
                 ],
                 isError: !result.success
@@ -364,7 +413,7 @@ export function registerDeviceTools(server: McpServer): void {
             description: "Open a URL in the iOS simulator (opens in default handler or Safari).\n" +
                 "PURPOSE: Drive an iOS simulator into a deep link or universal link entry point so you can exercise routing from an external entry.\n" +
                 "WHEN TO USE: Testing deep-link handlers, universal link routing, OAuth/SSO callback URLs, or any flow that enters the app via a URL.\n" +
-                "WORKFLOW: ios_boot_simulator -> ios_launch_app (or have the app running) -> ios_open_url -> ios_screenshot / get_screen_layout to verify the target screen rendered.\n" +
+                "WORKFLOW: ios_boot_simulator -> ios_launch_app (or have the app running) -> ios_open_url -> screenshot / get_screen_layout to verify the target screen rendered.\n" +
                 "GOOD: ios_open_url(url=\"myapp://product/42\") to land directly on a product screen.\n" +
                 "BAD: ios_open_url(url=\"...\") used as a substitute for in-app navigation when the user would normally tap — prefer `tap` for normal interaction flows.\n" +
                 platformUniqueBanner("testing iOS deep links or universal links"),

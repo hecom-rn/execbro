@@ -1,10 +1,11 @@
 // IMPORTANT: set test mode BEFORE importing src/index.ts so main() is skipped
-// (no license check, no transport, no HTTP listener, no CDP sockets).
+// (no transport, no HTTP listener, no CDP sockets).
 process.env.RN_AI_DEVTOOLS_TEST_MODE = "1";
 
 import { describe, it, expect, beforeEach } from "@jest/globals";
-import { toolRegistry } from "../../index.js";
-import { vaultAdd, resetVaultForTests } from "../../core/vault.js";
+
+const { toolRegistry } = await import("../../index.js");
+const { vaultAdd, resetVaultForTests } = await import("../../core/vault.js");
 
 describe("Phase 2 tool surface", () => {
     beforeEach(resetVaultForTests);
@@ -52,13 +53,13 @@ describe("list_secrets marks which credential an origin sends", () => {
         // from an Authorization header repointed the slot to a different KIND
         // of credential, and the next request by origin failed against a real
         // backend. Newest-wins is correct; silent is not.
-        vaultAdd("bearer-token-aaaaaaaaaaaaa", "auth", "https://gifted.fyi/a");
-        vaultAdd("redux-secret-bbbbbbbbbbbbb", "auth", "https://gifted.fyi/b");
+        vaultAdd("bearer-token-aaaaaaaaaaaaa", "auth", "https://appa.test/a");
+        vaultAdd("redux-secret-bbbbbbbbbbbbb", "auth", "https://appa.test/b");
         const out = await toolRegistry.get("list_secrets")!.handler({});
         const text = out.content[0].text as string;
         const marked = text.split("\n").filter((l) => l.includes("<- sent for"));
         expect(marked).toHaveLength(1);
-        expect(marked[0]).toContain("auth_gifted.fyi#2");
+        expect(marked[0]).toContain("auth_appa.test#2");
         expect(text).toContain("or a handle to pin one exact value");
     });
 });

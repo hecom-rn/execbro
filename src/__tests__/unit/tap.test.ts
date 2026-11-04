@@ -741,8 +741,8 @@ describe("findOcrMatch", () => {
         expect(findOcrMatch(result, "Sign In with Google")).toBeNull();
     });
 
-    it("reconstructs phrases from same-line words when the OCR engine fragmented them (gifted.co regression)", () => {
-        // Models the gifted.co login screen where iOS Vision returned "Continue", "with",
+    it("reconstructs phrases from same-line words when the OCR engine fragmented them (AppA regression)", () => {
+        // Models the AppA login screen where iOS Vision returned "Continue", "with",
         // "Google" as three separate word detections (the leading G icon disrupts the
         // engine's line-baseline grouping). No OCRLine entry is provided.
         function rowWord(text: string, x: number, y: number, x1: number, y1: number) {
@@ -769,7 +769,7 @@ describe("findOcrMatch", () => {
     });
 
     it("refines tap center to matched words inside a wider reconstructed line (horizontal-button-row case)", () => {
-        // Models Boardwise's "Yes Remotely No" row of three side-by-side buttons. Query
+        // Models AppB's "Yes Remotely No" row of three side-by-side buttons. Query
         // for one of them should tap that button, not the centroid of all three.
         function rowWord(text: string, x: number, y: number, x1: number, y1: number) {
             const tap = { x: (x + x1) / 2, y: (y + y1) / 2 };

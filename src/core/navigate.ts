@@ -11,8 +11,8 @@ import {
 /**
  * Poll schedule for confirming a navigation.
  *
- * Same-evaluation reads are unreliable in a way that varies BY APP: astro-app
- * read stale (reporting no change for a navigation that succeeded), gifted read
+ * Same-evaluation reads are unreliable in a way that varies BY APP: AppC
+ * read stale (reporting no change for a navigation that succeeded), AppA read
  * fresh. Both React Navigation, both measured 2026-07-31. Since the behaviour
  * cannot be predicted, verification is always a separate, delayed read — an app
  * that happens to read fresh simply settles on the first poll and costs one
@@ -89,7 +89,7 @@ function readStateExpression(): string {
             }
         } catch (e) { /* leave the stack partial rather than failing the read */ }
     }
-    return JSON.stringify({ current: t.current, stack: stack, all: t.all });
+    return JSON.stringify({ current: t.current, currentId: t.currentId, stack: stack, all: t.all });
 })()`;
 }
 
@@ -131,7 +131,7 @@ export async function performNavigation(opts: PerformNavigationOptions): Promise
         };
     }
 
-    let head: { ok: boolean; badArgs?: boolean; kind: string | null; error?: string; before?: string | null; routes?: string[] };
+    let head: { ok: boolean; badArgs?: boolean; kind: string | null; error?: string; before?: string | null; beforeId?: string | null; routes?: string[] };
     try {
         head = JSON.parse(String(performed.result));
     } catch {
@@ -167,7 +167,11 @@ export async function performNavigation(opts: PerformNavigationOptions): Promise
 
     // Settle-poll. Exit as soon as the route moves, so an app whose state reads
     // fresh pays one round trip instead of four.
+    // Compared by route key + params when the router reports them, so a move to
+    // the same route name with new params is not reported as "did not change".
+    const beforeId = head.beforeId ?? before;
     let after: string | null = before;
+    let afterId: string | null = beforeId;
     let stack: string[] = [];
     let all: string[] = [];
     let settled = false;
@@ -176,18 +180,19 @@ export async function performNavigation(opts: PerformNavigationOptions): Promise
         const read = await executeInApp(readStateExpression(), false, { originatingToolName: "navigate" }, device);
         if (!read.success) continue;
         try {
-            const parsed = JSON.parse(String(read.result)) as { current: string | null; stack: string[]; all: string[] };
+            const parsed = JSON.parse(String(read.result)) as { current: string | null; currentId?: string | null; stack: string[]; all: string[] };
             after = parsed.current;
+            afterId = parsed.currentId ?? parsed.current;
             stack = parsed.stack;
             all = parsed.all;
             settled = true;
-            if (after !== before) break;
+            if (afterId !== beforeId) break;
         } catch {
             // Try the next poll rather than failing the whole navigation.
         }
     }
 
-    const outcome = classifyNavigationOutcome(before, after, settled);
+    const outcome = classifyNavigationOutcome(beforeId, afterId, settled);
     return {
         success: true, kind: head.kind, action, to,
         route: { before, after },

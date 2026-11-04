@@ -14,7 +14,7 @@ export interface TruncateResult {
 }
 
 // Ordered loosest-to-tightest. The middle three are the budgets measured
-// against astro-app's live 1,625,530-byte contentApi slice, which they reduced
+// against AppC's live 1,625,530-byte contentApi slice, which they reduced
 // to 28,806 / 10,486 / 7,746 bytes respectively.
 const BUDGET_LADDER: TruncateBudget[] = [
     { maxDepth: 8, maxArrayItems: 50, maxStringLength: 1000 },
@@ -91,7 +91,7 @@ function bound(value: unknown, budget: TruncateBudget, depth: number, seen: Set<
  * Bound `value` so its serialised form fits within `maxBytes`.
  *
  * A value that already fits is returned untouched — identity matters because
- * most reads are tiny (Boardwise's median redux read is 70 characters) and must
+ * most reads are tiny (AppB's median redux read is 70 characters) and must
  * not be reshaped. Otherwise budgets are tried loosest-first so the caller
  * keeps as much structure as the target allows.
  */

@@ -3,6 +3,16 @@ import { listAllDevices, resetDeviceDiscoveryCache } from "./deviceDiscovery.js"
 import { listDevices, recordDevice } from "./projectMemory.js";
 import type { DevicePlatform } from "./types.js";
 
+// Chromium apps have no simulator or adb identity, so every native path below
+// is meaningless for them. Filtering here (not widening DeviceTarget) keeps
+// tap/swipe's native branches unreachable for a chromium device string.
+type NativeRegistryEntry = ReturnType<typeof getConnectedApps>[number] & {
+    app: { platform: "ios" | "android" | "harmony" };
+};
+function nativeRegistry(): NativeRegistryEntry[] {
+    return getConnectedApps().filter((e): e is NativeRegistryEntry => e.app.platform !== "chromium");
+}
+
 export type DeviceTargetSource =
     | "registry"
     | "udid"
@@ -225,7 +235,7 @@ async function resolveDeviceTargetInner(
             // API 36") matches what every other code path emits; the AVD
             // identifier ("Pixel_9_-_16kb") is confusing as a response label.
             // OB2 (2026-05-20).
-            const registryApp = getConnectedApps().find(
+            const registryApp = nativeRegistry().find(
                 (e) => e.app.platform === "android" && e.app.adbSerial === trimmed
             );
             return ok({
@@ -238,7 +248,7 @@ async function resolveDeviceTargetInner(
         }
         const phys = inv.android.physical.find((p) => p.serial === trimmed);
         if (phys) {
-            const registryApp = getConnectedApps().find(
+            const registryApp = nativeRegistry().find(
                 (e) => e.app.platform === "android" && e.app.adbSerial === trimmed
             );
             return ok({
@@ -281,7 +291,7 @@ async function resolveDeviceTargetInner(
     // agent passing "emulator" while a device literally named "emulator" and
     // an "emulator-5554" are both connected must land on the exact one.
     if (trimmed) {
-        const apps = getConnectedApps();
+        const apps = nativeRegistry();
         const needle = normalizeName(trimmed);
         const hits = apps
             .map((entry) => ({ entry, name: normalizeName(entry.app.deviceInfo.deviceName) }))
@@ -301,14 +311,24 @@ async function resolveDeviceTargetInner(
             // setup can be the OTHER device. Bug #5 (2026-05-20).
             let iosUdid = m.simulatorUdid;
             if (m.platform === "ios" && !iosUdid && m.deviceInfo.deviceName) {
+                let inv: Awaited<ReturnType<typeof listAllDevices>> | null = null;
                 try {
-                    const inv = await listAllDevices();
-                    const sim = inv.ios.simulators.find(
-                        (s) => s.state === "booted" && s.name === m.deviceInfo.deviceName
-                    );
-                    if (sim) iosUdid = sim.udid;
+                    inv = await listAllDevices();
                 } catch {
                     // best-effort; fall through with undefined udid
+                }
+                const sim = inv?.ios.simulators.find(
+                    (s) => s.state === "booted" && s.name === m.deviceInfo.deviceName
+                );
+                if (sim) iosUdid = sim.udid;
+                // No booted simulator carries this name: a USB iPhone. Returning
+                // an undefined UDID let callers default to whichever simulator
+                // is booted, so the error is what lets them try the physical path.
+                else if (inv) {
+                    return err(
+                        "DEVICE_NOT_FOUND",
+                        `"${m.deviceInfo.deviceName}" is a physical iOS device, not a simulator. screenshot captures it; tap, swipe and input_text cannot drive it (no touch injection below iOS 17).`
+                    );
                 }
             }
             // Same story for harmony: connect-time detection only correlates
@@ -369,18 +389,21 @@ async function resolveDeviceTargetInner(
     const inv = await listAllDevices();
     if (trimmed) {
         const needle = normalizeName(trimmed);
-        const iosBootedMatches = inv.ios.simulators.filter(
-            (s) => s.state === "booted" && normalizeName(s.name).includes(needle)
-        );
-        const androidRunningMatches = inv.android.emulators.filter(
-            (e) => e.state === "running" && normalizeName(e.name).includes(needle)
-        );
-        const androidPhysicalMatches = inv.android.physical.filter(
-            (p) => p.state === "device" && normalizeName(p.model).includes(needle)
-        );
-        const harmonyMatches = inv.harmony.targets.filter(
-            (t) => t.state === "connected" && normalizeName(t.key).includes(needle)
-        );
+        const iosBooted = inv.ios.simulators.filter((s) => s.state === "booted");
+        const androidRunning = inv.android.emulators.filter((e) => e.state === "running");
+        const androidOnline = inv.android.physical.filter((p) => p.state === "device");
+        const harmonyConnected = inv.harmony.targets.filter((t) => t.state === "connected");
+        // Same rule as the registry step: an exact name anywhere wins over substrings.
+        const anyExact =
+            iosBooted.some((s) => normalizeName(s.name) === needle) ||
+            androidRunning.some((e) => normalizeName(e.name) === needle) ||
+            androidOnline.some((p) => normalizeName(p.model) === needle) ||
+            harmonyConnected.some((t) => normalizeName(t.key) === needle);
+        const hit = (name: string) => (anyExact ? normalizeName(name) === needle : normalizeName(name).includes(needle));
+        const iosBootedMatches = iosBooted.filter((s) => hit(s.name));
+        const androidRunningMatches = androidRunning.filter((e) => hit(e.name));
+        const androidPhysicalMatches = androidOnline.filter((p) => hit(p.model));
+        const harmonyMatches = harmonyConnected.filter((t) => hit(t.key));
 
         const totalMatches =
             iosBootedMatches.length +
@@ -470,7 +493,7 @@ async function resolveDeviceTargetInner(
     if (totalRunning === 0) {
         // Final fallback: if a single RN app is connected (e.g. physical iOS
         // not in simctl), use it.
-        const apps = getConnectedApps();
+        const apps = nativeRegistry();
         if (apps.length === 1) {
             const m = apps[0].app;
             return ok({
@@ -590,7 +613,7 @@ export async function resolveDeviceTarget(
             const identifier = t.iosUdid ?? t.androidSerial ?? t.harmonyTargetKey ?? t.deviceName;
             let appId: string | undefined;
             try {
-                appId = getConnectedApps().find(
+                appId = nativeRegistry().find(
                     (e) =>
                         e.app.simulatorUdid === identifier ||
                         e.app.adbSerial === identifier ||

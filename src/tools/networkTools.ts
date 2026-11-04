@@ -23,14 +23,18 @@ import { refreshMirror } from "../core/sdkMirrorPoller.js";
 import { withRestartDividers, evictionNotice, resolveEpochFilter } from "../core/epochRender.js";
 import { formatRequest } from "../core/network.js";
 import { pushMockRules } from "../core/networkInterceptor.js";
+import { connectedApps } from "../core/state.js";
 import {
     addRule,
     removeRule,
     clearRules,
+    clearAllRules,
+    devicesWithRules,
     clearConditionRules,
     listRules,
     serializeRules,
     formatRuleList,
+    describeRuleMatch,
     activeMockBanner,
 } from "../core/mockRules.js";
 import {
@@ -46,7 +50,7 @@ import { DEVICE_ALL_DESC } from "./_deviceArg.js";
  * rule added while an iPhone and an emulator are both connected must not fire
  * on both — so unlike the read tools this one never merges.
  */
-function resolveMockTarget(device?: string): { ws: import("ws").WebSocket; deviceName: string } {
+function resolveMockTarget(device?: string): { ws: import("ws").WebSocket; deviceName: string; platform: string | undefined } {
     const app = getConnectedAppByDevice(device);
     if (!app) {
         throw new UserInputError(
@@ -56,7 +60,8 @@ function resolveMockTarget(device?: string): { ws: import("ws").WebSocket; devic
     }
     return {
         ws: app.ws,
-        deviceName: app.deviceInfo.deviceName || app.deviceInfo.title || "unknown"
+        deviceName: app.deviceInfo.deviceName || app.deviceInfo.title || "unknown",
+        platform: app.platform
     };
 }
 
@@ -251,12 +256,15 @@ export function registerNetworkTools(server: McpServer): void {
                 "GOOD: search_network({ urlPattern: \"/graphql\" })\n" +
                 "BAD: search_network({ urlPattern: \"\" }) — empty pattern matches everything; use get_network_requests instead.\n",
             inputSchema: {
-                urlPattern: z.string().describe("URL pattern to search for. Also matches GraphQL operation names (e.g. \"GetCharacters\") — use the operation name to find one GraphQL call among many sharing the same endpoint."),
+                urlPattern: z.string().optional().describe("URL pattern to search for. Also matches GraphQL operation names (e.g. \"GetCharacters\") — use the operation name to find one GraphQL call among many sharing the same endpoint."),
+                query: z.string().optional().describe("Alias for `urlPattern`."),
                 maxResults: z.number().optional().default(50).describe("Maximum number of results to return (default: 50)"),
                 device: z.string().optional().describe(DEVICE_ALL_DESC)
             }
         },
-        async ({ urlPattern, maxResults, device }) => {
+        async ({ urlPattern: patternArg, query, maxResults, device }) => {
+            const urlPattern = patternArg ?? query;
+            if (urlPattern === undefined) throw new UserInputError("search_network needs `urlPattern` to search for.", "missing_url_pattern");
             await refreshMirror(device);
 
             const networkBuffer = resolveNetworkBuffer(device);
@@ -401,7 +409,8 @@ export function registerNetworkTools(server: McpServer): void {
                 "WORKFLOW: network_mock({action:\"add\", url:\"/orders\", status:500}) -> reproduce -> get_network_requests (rows show [MOCK m1]) -> network_mock({action:\"clear\"}).\n" +
                 "MODES: replace returns a canned response; tamper fetches the real one and mutates it (set/remove take dotted paths).\n" +
                 "MATCHING: url is a substring by default; wrap it in slashes for a regex (\"/\\\\/orders\\\\/\\\\d+$/\"). First matching rule wins, so add specific rules before broad ones.\n" +
-                "LIMITATIONS: JS-originated HTTP only — native-module traffic (native SDKs, <Image> loading) is not intercepted. Rules are per-device and survive reload_app; clear them when done.\n" +
+                "GRAPHQL: every operation shares one URL, so add operation:\"GetUser\" to match one operation by name (operationName in the body, the name in the query document, or operationName in a GET URL). url is optional then. Batched array bodies are not matched.\n" +
+                "LIMITATIONS: JS-originated HTTP only — native-module traffic (native SDKs, <Image> loading) is not intercepted. Rules are per-device and survive reload_app; clear them when done (a bare clear covers every device).\n" +
                 "GOOD: network_mock({action:\"add\", url:\"/orders\", mode:\"tamper\", remove:[\"data.email\"]})\n" +
                 "BAD: leaving a rule active and then debugging why the app 'always fails' — check network_mock({action:\"list\"}) hit counts first.",
             inputSchema: {
@@ -409,6 +418,10 @@ export function registerNetworkTools(server: McpServer): void {
                 id: z.string().optional().describe("Rule id, for action=\"remove\"."),
                 url: z.string().optional().describe("URL substring, or /regex/ when slash-wrapped."),
                 method: z.string().optional().describe("Restrict to one HTTP method."),
+                operation: z
+                    .string()
+                    .optional()
+                    .describe("GraphQL operation name to match exactly, e.g. \"GetUser\". Narrows url; with no url it matches that operation on any endpoint."),
                 mode: z
                     .enum(["replace", "tamper"])
                     .optional()
@@ -439,6 +452,32 @@ export function registerNetworkTools(server: McpServer): void {
             }
         },
         async (args) => {
+            // A bare clear covers every device, as the read banner that lists them all
+            // promises, and reaches a closed window's rules, which no device name resolves.
+            if (args.action === "clear" && args.device === undefined) {
+                const counts = clearAllRules();
+                for (const app of connectedApps.values()) {
+                    if (app.runtime === "native") continue; // mock rules live in a JS runtime
+                    const name = app.deviceInfo.deviceName || app.deviceInfo.title || "unknown";
+                    if (counts.has(name)) pushMockRules(app.ws, serializeRules(name));
+                }
+                const total = [...counts.values()].reduce((a, b) => a + b, 0);
+                const per = [...counts].map(([name, n]) => `${n} on ${name}`).join(", ");
+                return {
+                    content: [{ type: "text" as const, text: `Cleared ${total} mock rule(s) on every device${per ? ` (${per})` : ""}.` }]
+                };
+            }
+
+            // Rules are server-side state, so listing them needs no connection: a
+            // disconnected session must still be able to see what it left behind.
+            if (args.action === "list" && args.device === undefined && !getConnectedAppByDevice()) {
+                const names = devicesWithRules();
+                const text = names.length === 0
+                    ? "No mock rules active."
+                    : names.map((name) => `${name}:\n${formatRuleList(name)}`).join("\n\n");
+                return { content: [{ type: "text" as const, text }] };
+            }
+
             const { ws, deviceName } = resolveMockTarget(args.device);
 
             if (args.action === "list") {
@@ -481,15 +520,16 @@ export function registerNetworkTools(server: McpServer): void {
                 };
             }
 
-            if (!args.url) {
+            if (!args.url && !args.operation) {
                 throw new UserInputError(
-                    "action=\"add\" needs a url to match on. Use a substring (\"/orders\"), or slash-wrap it for a regex.",
+                    "action=\"add\" needs a url to match on (a substring like \"/orders\", or slash-wrapped for a regex), or a GraphQL operation name.",
                     "missing_rule_url"
                 );
             }
             const rule = addRule(deviceName, {
-                url: args.url,
+                url: args.url ?? "",
                 method: args.method,
+                operation: args.operation,
                 mode: args.mode ?? "replace",
                 times: args.times,
                 delayMs: args.delayMs,
@@ -507,8 +547,26 @@ export function registerNetworkTools(server: McpServer): void {
             // A rule added behind a broader one never fires, and the only
             // symptom is hits=0 much later. Say so at the point of the mistake.
             const shadowedBy = listRules(deviceName).find(
-                (r) => r.id !== rule.id && !r.method && r.url !== "" && rule.url.indexOf(r.url) !== -1
+                (r) => r.id !== rule.id && !r.method && !r.operation && r.url !== "" && rule.url.indexOf(r.url) !== -1
             );
+            // Checked rather than assumed: a JS context keeps the interceptor it
+            // was first given, and one from an older execbro cannot match an
+            // operation. The push script holds such a rule back, so it is safe
+            // but silent, and hits=0 would read as "the app never called it".
+            let staleNote = "";
+            if (rule.operation) {
+                const probe = await executeInApp(
+                    "String(!!globalThis.__RN_NET_MOCK_OPS__)",
+                    false,
+                    { timeoutMs: 5000, originatingToolName: "network_mock" },
+                    args.device
+                );
+                if (probe.success && probe.result === "false") {
+                    staleNote =
+                        "\nNOT ACTIVE YET: the app still runs a network interceptor injected by an older execbro, which cannot match by operation. " +
+                        "The rule is held back rather than mocking every request on that url. reload_app once and it takes effect.";
+                }
+            }
             const shadowNote = shadowedBy
                 ? `\nWARNING: [${shadowedBy.id}] matches "${shadowedBy.url}" and is listed first, so it will fire instead. Remove it or reorder.`
                 : "";
@@ -518,8 +576,8 @@ export function registerNetworkTools(server: McpServer): void {
                     {
                         type: "text" as const,
                         text:
-                            `Added [${rule.id}] ${rule.method ?? "ANY"} ${rule.url} -> ${rule.mode} on ${deviceName}. ` +
-                            `Survives reload_app. Clear with network_mock({action:"clear"}).${shadowNote}`
+                            `Added [${rule.id}] ${describeRuleMatch(rule)} -> ${rule.mode} on ${deviceName}. ` +
+                            `Survives reload_app. Clear with network_mock({action:"clear"}).${shadowNote}${staleNote}`
                     }
                 ]
             };
@@ -553,7 +611,7 @@ export function registerNetworkTools(server: McpServer): void {
             }
         },
         async (args) => {
-            const { ws, deviceName } = resolveMockTarget(args.device);
+            const { ws, deviceName, platform } = resolveMockTarget(args.device);
 
             // Only this tool's own rule is removed. Clearing the device would
             // destroy the agent's network_mock rules as a side effect of asking
@@ -590,9 +648,10 @@ export function registerNetworkTools(server: McpServer): void {
             pushMockRules(ws, serializeRules(deviceName));
 
             // NetInfo only matters at the two ends of the range. "slow" leaves
-            // the device reporting connected, which is the truth.
+            // the device reporting connected, which is the truth. A chromium page
+            // has no Metro require to find NetInfo with, so it is not asked.
             const parts = [`${summary} (${deviceName})`];
-            if (args.mode !== "slow") {
+            if (args.mode !== "slow" && platform !== "chromium") {
                 const result = await executeInApp(
                     buildNetInfoPatchScript(args.mode === "offline"),
                     false,

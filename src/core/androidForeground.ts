@@ -30,8 +30,8 @@ export async function androidForegroundPackage(deviceId?: string): Promise<strin
 /**
  * Pull the package name out of a `mCurrentFocus` dump line.
  *
- *   mCurrentFocus=Window{9b2dd10 u0 com.gifted.production/com.gifted.production.MainActivity}
- *     → "com.gifted.production"
+ *   mCurrentFocus=Window{9b2dd10 u0 com.example.appa/com.example.appa.MainActivity}
+ *     → "com.example.appa"
  *
  * A device with no focused window reports `mCurrentFocus=null`, which is not a package and
  * must not be compared against one.

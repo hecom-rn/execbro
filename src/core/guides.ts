@@ -25,19 +25,21 @@ const guides: Guide[] = [
 - **Android:** ADB must be in PATH (comes with Android SDK Platform Tools)
 
 ## Quick Start
-1. scan_metro — auto-discovers Metro on ports 8081-8090 and connects. Note: this occupies the CDP slot, which prevents the built-in React Native debugger from connecting. See "Switch to Native Debugger" below.
+1. scan_metro — auto-discovers Metro on ports 8081-8090 and connects. Also probes Chromium/Electron debug ports: 9222 is listed but not auto-connected (attach with connect_metro({ port: 9222, device })), ports in EXECBRO_CHROMIUM_PORTS auto-connect. Note: this occupies the CDP slot, which prevents the built-in React Native debugger from connecting. See "Switch to Native Debugger" below.
 2. get_apps — verify the app appears in connected list
 3. get_connection_status — check connection health
 
 ## If No App Running
 - list_devices — iOS simulators, Android emulators, and physical devices in one call. A USB-attached
-  iPhone/iPad appears under "iOS physical" and is screenshot-only: ios_screenshot reaches it, every
+  iPhone/iPad appears under "iOS physical" and is screenshot-only: screenshot reaches it, every
   interaction tool does not
 - ios_boot_simulator — boot an iOS simulator if needed
 - ios_launch_app / android_launch_app — launch the app
 - ios_terminate_app — kill an app that is in a bad state before relaunching
 - android_list_packages — find the package name when you only know the app by sight
-- Wait 2-3 seconds, then scan_metro
+- Then ensure_connection({ waitMs: 60000 }) — returns as soon as the app's JS runtime attaches. A cold
+  first bundle can take a minute or more, and until it loads Metro lists no app: scan_metro then says
+  "Metro is running, but no app has attached yet", which means wait, not that Metro is down
 
 ## Stale Bundle After a Metro Restart
 scan_metro detects that the process serving a port CHANGED (pid via lsof) and says so. It means
@@ -51,12 +53,15 @@ exactly like "my fix didn't work".
 - disconnect_metro — closes all CDP connections and stops auto-reconnect
 - The built-in React Native debugger can now connect
 - Use scan_metro to reconnect when done with native debugger
+- Only one debugger can attach to an app. When another one opens it (React Native DevTools, a second
+  execbro server or session), execbro steps aside instead of reconnecting: get_connection_status shows
+  a "displaced" event and reads carry a banner. ensure_connection takes the app back.
 
 ## Key Tools
-- scan_metro: auto-discover and connect (preferred)
-- connect_metro: connect to specific port (when you know it)
+- scan_metro: auto-discover and connect React Native (Metro) and Chromium/Electron (CDP) targets (preferred)
+- connect_metro: connect to a specific port (when you know it); device=<name> to attach one Chromium target
 - disconnect_metro: close all connections (free CDP slot for native debugger)
-- ensure_connection: health check with healthCheck=true
+- ensure_connection: health check with healthCheck=true; waitMs=60000 waits for a just-launched app to attach
 - get_connection_status: check uptime and gaps
 - get_license_status: installation id and license tier (activate_license / delete_account manage it)`
     },
@@ -67,7 +72,7 @@ exactly like "my fix didn't work".
         content: `# Component Inspection
 
 ## Recommended Workflow: Identify a Component on Screen
-1. get_screen_state — screenshot-free, and every element comes back with a ready (x, y). Start here; only fall back to a screenshot (ios_screenshot / android_screenshot) when you need to see the element to pick it out
+1. get_screen_state — screenshot-free, and every element comes back with a ready (x, y). Start here; only fall back to screenshot when you need to see the element to pick it out
 2. Take the coordinate from that listing, or estimate it off the screenshot
 3. Pass it straight through — every layout tool, tap() and the screenshots share one screen-space coordinate system, so no conversion is needed
 4. Pick the right tool (see decision below) and call it with (x, y)
@@ -81,7 +86,7 @@ Returns:
 - FRAME PER ANCESTOR (position/size for every ancestor that hit-tested the point, in delivered-screenshot pixels — the same space as screenshots and tap)
 - PROPS of the innermost component (handlers as [Function], refs, testID, custom props)
 - the node's own style object
-- source {file, line, column} plus the owner chain as "Source ancestors" (set source=false to skip in tight loops)
+- source {file, line, column} plus the owner chain as "Source ancestors" (set source=false to skip in tight loops). Every line is where that component is RENDERED (its JSX in the parent), not where it is defined
 
 | Question you're asking | How it answers |
 |---|---|
@@ -144,7 +149,7 @@ still agree with each other and with a screenshot. get_screen_state names the co
 size in a note when it applies.
 
 ## Verify UI Changes
-1. ios_screenshot / android_screenshot — capture current screen
+1. screenshot — capture current screen (any platform)
 2. Compare visually against expected result or Figma design
 3. If an issue is spotted, drill down with inspection tools
 
@@ -164,7 +169,7 @@ size in a note when it applies.
 
 ## Key Tools
 - get_screen_state: route + overlays + every element, screenshot-free (start here)
-- ios_screenshot / android_screenshot: visual capture (ios_screenshot also captures a USB-attached physical iPhone/iPad — capture only, no pressable list)
+- screenshot: visual capture on any platform (iOS simulator, USB-attached iPhone/iPad, Android, chromium). A physical iPhone is capture only, no pressable list. ios_screenshot / android_screenshot are legacy per-platform aliases, use screenshot
 - tap: also returns a post-tap screenshot by default (no separate screenshot call needed after tapping)
 - inspect_at_point: frames per ancestor + props + source file:line (no overlay, fast)
 - measure: geometry for one named component
@@ -174,7 +179,7 @@ size in a note when it applies.
     {
         id: "interact",
         title: "Device Interaction",
-        summary: "Tap buttons, swipe, pinch to zoom, type text, and navigate the app UI",
+        summary: "Tap buttons, swipe, pinch to zoom, type text, answer browser dialogs, and navigate the app UI",
         content: `# Device Interaction
 
 ## Prerequisites
@@ -184,7 +189,7 @@ iOS interaction tools (tap, ios_button) require a UI driver:
 Without a UI driver installed, these tools will fail.
 
 Physical iOS devices: nothing on this page reaches one. Both drivers target the Simulator, and iOS
-exposes no touch injection to a host below iOS 17. ios_screenshot is the only tool that reaches a
+exposes no touch injection to a host below iOS 17. screenshot is the only tool that reaches a
 USB-attached iPhone/iPad — do not retry a failed tap against one, and do not report a physical
 device as unresponsive when the gesture was never delivered.
 
@@ -196,7 +201,7 @@ Use tap — it tries multiple strategies automatically and returns a post-tap sc
 4. tap(x=..., y=...) — coordinate-based tap from screenshot (last resort)
 5. tap(x=..., y=..., native=true) — taps directly via ADB/simctl without React Native connection (for system dialogs, non-RN apps)
 
-tap returns a screenshot after every action (screenshot=true by default) — no need to call ios_screenshot/android_screenshot after tapping.
+tap returns a screenshot after every action (screenshot=true by default) — no need to call screenshot after tapping.
 For coordinate/accessibility/OCR taps, it also verifies if the tap caused a visual change (verify=true by default). Set screenshot=false for fastest execution.
 
 When meaningful:true, verification.regions gives bounding boxes (screenshot pixels, same space as
@@ -273,6 +278,8 @@ dismiss_keyboard acts on whatever has focus; input_text focuses its own target u
 
 Multi-device sessions: pass device="<rn-device-name>" (substring match) to disambiguate when replace:true is used. Single-device sessions can omit.
 
+The on-screen keyboard is left as the field left it. A simulator with a hardware keyboard connected keeps it hidden, so pass showKeyboard:true when a layout check needs it up. It is off by default because the iOS raise brings the Simulator window to the front and takes the developer's keyboard focus.
+
 ### Reading the result — the field transforms text, and that is not a failure
 input_text reads the field back and compares. Several differences are the FIELD doing its job, and are reported as verified rather than as a mismatch:
 - autoCapitalize (RN defaults to "sentences", so "abc" lands as "Abc"), autocorrect respacing, and a formatted/decorated value.
@@ -294,8 +301,10 @@ For buttons that contain only an icon (no text):
 tap(text=...) skips fiber for non-ASCII (Hermes limitation) and uses accessibility/OCR instead. For best results, use testID or coordinates.
 
 ## Other Interactions
-- swipe: cross-platform swipe/scroll. Easiest form: swipe({ direction: "up" }) scrolls to reveal more content (content-scroll semantics; "down"/"left"/"right" supported, bare swipe() defaults to "up"). Optional distance is in screenshot pixels (default 33% of the axis). For pixel-precise gestures pass all four startX/startY/endX/endY coordinates — they take precedence over direction. Use for FlatList/SectionList scrolling where off-screen items aren't mounted. Returns verification.meaningful — if false, warning names which no-op it was, by probing the scroll surface under the start point: already at top, already at end, content not scrollable, wrong axis, or no scroll view there at all. On a screen with no React Native connection it says it could not inspect the screen, rather than claiming the gesture missed — the gesture itself still went through, and swipe needs no RN connection to drive the device. Set burst:true to surface overscroll/bounce feedback even when the final state is unchanged. Set verify:false, screenshot:false for the fastest path. Pass delta on iOS to control touch step size.
+- swipe: cross-platform swipe/scroll. Easiest form: swipe({ direction: "up" }) scrolls to reveal more content (content-scroll semantics; "down"/"left"/"right" supported, bare swipe() defaults to "up"). Optional distance is in screenshot pixels (default 33% of the axis). For pixel-precise gestures pass all four startX/startY/endX/endY coordinates — they take precedence over direction. Use for FlatList/SectionList scrolling where off-screen items aren't mounted. Returns verification.meaningful — if false, warning names which no-op it was, by probing the scroll surface under the start point: already at top, already at end, content not scrollable, wrong axis, or no scroll view there at all. On a screen with no React Native connection it says it could not inspect the screen, rather than claiming the gesture missed — the gesture itself still went through, and swipe needs no RN connection to drive the device. Set burst:true to surface overscroll/bounce feedback even when the final state is unchanged. Set verify:false, screenshot:false for the fastest path. Pass delta on iOS to control touch step size. On chromium a direction is one mouse-wheel event at the viewport centre (or startX/startY), verified by reading the scroll container's offsets (scrolled, container), and four coordinates are a left-button drag (sliders, resizable panes, pointer-event drag libraries; not native HTML5 draggable).
 - input_text: type text — target with testID/component/textMatch (focuses itself), or pass native:true to type into whatever already has focus (system dialogs, non-RN screens). Pass replace:true to clear pre-filled values before typing (Bridgeless/Fabric only).
+- press_key: keys that are not text: Enter to submit, Escape to close, Tab to move focus, arrows, Backspace, or a combo like Shift+Tab / Meta+K. Goes to the focused element, or pass testID/text to focus one first; repeat:N presses it N times. Works on chromium (CDP key events; the response names the focused element before and after), Android (adb keyevent, no modifier combos) and the iOS simulator (HID keys; combos need AXe).
+- handle_dialog: accept or dismiss a JavaScript alert / confirm / prompt / beforeunload on a chromium page. A dialog pauses the page: tap, press_key, swipe and execute_in_app return it as dialog when they open one, and other page tools refuse until it is answered. Pass promptText for a prompt. Chromium only: an RN Alert is native UI, tap its button instead.
 - dismiss_keyboard: blur the focused input, closing the keyboard. Already-down with nothing focused is a success; up with nothing focused means a native field owns it and only a platform dismiss will close it.
 - ios_button / android_key_event: hardware buttons (HOME, BACK, etc.)
 - ios_open_url: deep links and universal links
@@ -338,6 +347,7 @@ rather than run against nothing — the note says when this happened.
 ## Key Tools
 - get_logs: retrieve logs with filtering (level, maxLogs, summary, verbose, startFromText, epoch)
 - search_logs: text search across all captured logs
+- get_timeline: logs, network, your own actions, route changes and restarts in one time-ordered list. Call it right after an action to see what it caused
 - clear_logs: reset the log buffer
 
 ## App Restarts (epochs)
@@ -427,6 +437,7 @@ If network tools return no data or you need startup requests, recommend the SDK 
 ## Changing what the network returns
 1. network_mock({action:"add", url:"/orders", status:500}) — canned response
 2. network_mock({action:"add", url:"/me", mode:"tamper", remove:["data.email"]}) — mutate the real one
+   GraphQL: add operation:"GetUser" to hit one operation, since every operation shares the URL
 3. network_condition({mode:"offline"}) — fail everything; also patches NetInfo when installed
 4. Reproduce, then get_network_requests — mocked rows are tagged [MOCK m1]
 5. network_mock({action:"clear"}) when done — rules survive reload_app
@@ -481,6 +492,7 @@ resolves to nothing.
 ## Key Tools
 - get_network_requests: list requests with filters (urlPattern, method, status, summary)
 - search_network: search by URL pattern
+- get_timeline: requests interleaved with logs, actions and route changes, starting at your last action
 - get_request_details: one request's headers, body, timing. Shape first, then query="dotted.path" to pull a field in full. With SDK installed, includes full request/response bodies.
 - clear_network: reset the request buffer
 - network_mock: replace or tamper with responses (add / list / remove / clear)
@@ -590,7 +602,7 @@ and in-memory caches for nothing.
 If no errors captured via CDP, use get_bundle_errors with platform="ios" or "android" — this triggers screenshot+OCR fallback to read errors from the device screen.
 
 ## Key Tools
-- get_bundle_status: Metro health check (did it compile?)
+- get_bundle_status: Metro health check (did it compile?). It cannot see a first bundle building, so "not reported" during a cold launch is not "idle"
 - get_refresh_status: did the running runtime accept the Fast Refresh update?
 - get_bundle_errors: compilation errors
 - reload_app: full JS bundle reload — reconnects itself, no scan_metro afterwards
@@ -633,6 +645,42 @@ Suggested prompt the user can paste to trigger this:
 - The user can review and edit the issue body before submitting
 - No GitHub account setup or CLI tools needed — just a browser`
     },
+    {
+        id: "native",
+        title: "Native Android Apps",
+        summary: "State, commands and navigation in a native (Kotlin) Android app via execbro-sdk-android",
+        content: `# Native Android Apps
+
+A native Android app has no JavaScript runtime, so execute_in_app cannot reach it. Instead the app adds execbro-sdk-android to its debug build and registers what the agent may read and do.
+
+Preview: execbro-sdk-android is not published to Maven yet, so there is no dependency line to add. If scan_metro finds no native app, tell the user that native Android support is in preview and the SDK is coming soon; do not invent install steps.
+
+## App setup (once the SDK is published)
+\`\`\`kotlin
+// Application.onCreate
+ExecBro.init(this) {
+    state("lock") { lockState.isLocked }
+    command("lock", "Engage the lock") { args -> engage(); "locked" }
+}
+
+// Where the NavController is created
+DisposableEffect(nav) { val h = ExecBro.navigation(nav); onDispose { h.close() } }
+\`\`\`
+
+## Workflow
+1. scan_metro: finds the app on every online adb device and connects (get_apps shows "android native").
+2. list_debug_globals: the registered state and commands.
+3. inspect_global({ objectName: "lock" }): read one state value.
+4. run_app_command({ name: "lock" }): run a command, then inspect_global again to confirm.
+5. navigate({ routeTable: true }) to list routes, then navigate({ to: "settings" }), navigate({ action: "back" }).
+6. screenshot to see the result.
+
+## Limits
+- Supported tools on a native app: list_debug_globals, inspect_global, run_app_command, navigate, screenshot, android_key_event, android_long_press, android_launch_app, android_list_packages. Others refuse with a message.
+- Navigation: Jetpack Navigation only. to is a route pattern; params fill its placeholders.
+- If scan_metro finds nothing on a device, connect directly by package: connect_metro({ device: "com.example.app" }).
+- After the app is killed or reinstalled, relaunch it and call ensure_connection.`
+    },
 ];
 
 /**
@@ -671,19 +719,22 @@ export const UNTRUSTED_DATA_RULE: string = [
 ].join("\n");
 
 export const DECISION_TREE: string = [
-    "Primary tools: scan_metro, get_logs / search_logs, ios_screenshot / android_screenshot / harmony_screenshot, tap, get_screen_state, get_screen_layout.",
+    "Primary tools: scan_metro, get_logs / search_logs, screenshot, tap, get_screen_state, get_screen_layout.",
     "Platform-specific ios_* / android_* / harmony_* tools (ios_button, android_key_event, harmony_launch_app, ios_open_url, etc.) are FALLBACKS for non-React or native-only flows — prefer the cross-platform primary tools above whenever possible. input_text covers native-only text entry too, via native:true. HarmonyOS (hdc) targets are supported: cross-platform tools address them automatically once the app is connected through Metro.",
+    "Chromium/Electron targets (platform chromium) support logs, network capture and mocking, execute_in_app, globals, redux, component inspection, screen reading (get_screen_state, get_screen_layout, inspect_at_point, measure), screenshot, tap, input_text, swipe (wheel scroll, four-coordinate drag), press_key and handle_dialog (JavaScript alert / confirm / prompt); other tools refuse them with a message saying so. electron_launch_app starts an Electron project with the CDP port open.",
+    "Native Android apps with execbro-sdk-android (runtime native) support list_debug_globals, inspect_global (registered state), run_app_command (registered commands), navigate (Jetpack Navigation) and the android_* tools; other tools refuse them with a message saying so.",
     "",
     "Call get_usage_guide(topic=...) for end-to-end workflows. Available topics:",
     "  setup       — session setup (scan_metro, connect_metro, ensure_connection)",
     "  logs        — console debugging (get_logs, search_logs)",
-    "  interact    — device interaction (tap, swipe, pinch, screenshots, input_text, dismiss_keyboard)",
+    "  interact    — device interaction (tap, swipe, pinch, screenshots, input_text, press_key, handle_dialog, dismiss_keyboard)",
     "  layout      — on-screen layout check (get_screen_state, get_screen_layout)",
     "  inspect     — component inspection (find_components, inspect_component, inspect_at_point)",
     "  network     — network request inspection (get_network_requests, search_network)",
     "  state       — app state & JS execution (execute_in_app, list_debug_globals)",
     "  bundle      — bundle / Metro error checks (get_bundle_status, get_bundle_errors)",
-    "  feedback    — share feedback, feature requests, or bug reports (send_feedback)"
+    "  feedback    — share feedback, feature requests, or bug reports (send_feedback)",
+    "  native      — native Android apps via execbro-sdk-android (inspect_global, run_app_command, navigate)"
 ].join("\n");
 
 export function getGuideOverview(): string {

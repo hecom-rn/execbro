@@ -25,11 +25,15 @@ import {
     getConnectedAppByDevice,
     getFirstConnectedApp,
 } from "../core/index.js";
+import { chromiumAppFor } from "../core/connection.js";
+import { chromiumScreenState, chromiumScreenLayout, chromiumInspectAtPoint, chromiumMeasure } from "../core/chromiumScreen.js";
 import {
     screenStateToScreenSpace,
     toDeliveredPxY,
     toDeliveredPxX,
     toDeliveredPxLength,
+    fromDeliveredPxX,
+    fromDeliveredPxY,
     pxScaleConverter,
     unresolvedScaleNote,
     type ScreenSpaceMetrics
@@ -50,7 +54,9 @@ import { DEVICE_ARG_DESC } from "./_deviceArg.js";
  */
 async function resolveScreenSpaceMetricsFor(device?: string): Promise<ScreenSpaceMetrics> {
     const app = (device ? getConnectedAppByDevice(device) : getFirstConnectedApp()) ?? getFirstConnectedApp();
-    if (!app) return { platform: "ios", topInset: 0 };
+    // topInset 0 means "leave coordinates alone", which is also the right answer
+    // for chromium: CSS pixels have no status bar to subtract.
+    if (!app || app.platform === "chromium") return { platform: "ios", topInset: 0 };
     return resolveScreenSpaceMetrics({
         platform: app.platform,
         udid: app.simulatorUdid,
@@ -68,6 +74,15 @@ function collectMetaNotes(r: ExecutionResult): string[] {
         out.push(`[warning: timeoutMs ${r._meta.timeoutClampedFrom} clamped to 120000]`);
     }
     return out;
+}
+
+/** Chromium branches return plain text or throw; this is their one response shape. */
+async function chromiumText(run: () => Promise<string>) {
+    try {
+        return { content: [{ type: "text" as const, text: await run() }] };
+    } catch (err) {
+        return { content: [{ type: "text" as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true as const };
+    }
 }
 
 export function registerComponentTools(server: McpServer): void {
@@ -107,6 +122,10 @@ export function registerComponentTools(server: McpServer): void {
             }
         },
         async ({ extended, summary, device, timeoutMs }) => {
+            const chromeApp = chromiumAppFor("get_screen_layout", device);
+            if (chromeApp) {
+                return await chromiumText(async () => `Screen Layout:\n\n${await chromiumScreenLayout(chromeApp, { extended, summary })}`);
+            }
             if (!await awaitMetro()) {
                 const hint = await metroMissingHintIfAbsent("get_screen_layout");
                 return {
@@ -268,7 +287,7 @@ export function registerComponentTools(server: McpServer): void {
                 "Each line carries an (x, y) center + frame bounds (so anything is a tap(x, y) target), typed by a leading marker: 🔘 pressable (with component JSX tag, label, testID, onPress hint), 📝 text, 🖼 image (with src/alt). " +
                 "Elements covered by an open overlay are grouped under 🚫 Blocked — visible for context, but taps will NOT reach them until the overlay closes.\n\n" +
                 "WHEN TO USE: After every tap/swipe that may navigate, and to read screen content (prices, labels, which image loaded) without a screenshot+OCR round-trip.\n" +
-                "COORDINATES: delivered-screenshot pixels — the same space as ios_screenshot/android_screenshot, get_screen_layout, inspect_at_point, measure and tap(). Pass them through unchanged; never scale by devicePixelRatio yourself.\n" +
+                "COORDINATES: delivered-screenshot pixels — the same space as screenshot, get_screen_layout, inspect_at_point, measure and tap(). Pass them through unchanged; never scale by devicePixelRatio yourself.\n" +
                 "LIMITATIONS: route is null without React Navigation / Expo Router. Requires a live Metro connection.\n" +
                 "HISTORY: includeHistory=true appends the route trail (dwell + origin per screen).\n" +
                 "PARAMS: route params listed by key; fullParams=true adds values.\n" +
@@ -278,11 +297,18 @@ export function registerComponentTools(server: McpServer): void {
                 device: z.string().optional().describe(DEVICE_ARG_DESC),
                 pressablesOnly: z.boolean().optional().describe("Return only route + overlays + pressables (the lean orientation snapshot), omitting on-screen text and images. Default false. Pressables include Switch/checkbox elements (onValueChange), each rendered with its current value as [switch:ON] / [switch:OFF] — tap those by testID or component instead of guessing an x from a screenshot."),
                 fullText: z.boolean().optional().describe("Emit each text node's full string instead of the 80-char truncation. Default false."),
-                fullParams: z.boolean().optional().describe("Emit the route params' values. Default false — only the param key names are listed, because the full blob is usually hundreds of characters of ids and image URLs."),
-                includeHistory: z.boolean().optional().describe("Append the route trail — which screens the app has been on, most recent first, with dwell time and the route each was entered from. Recorded from connection time; an app restart shows an epoch divider. If no navigation listener could be attached the trail reports itself as sampled, meaning transitions between calls may be missing. Default false.")
+                fullParams: z.boolean().optional().describe("Emit the route params' values. Default false — only the param key names are listed, because the full blob is usually hundreds of characters of ids and image URLs. On chromium (Electron / Chrome) the route is the page URL, its query string the params, and elements come from the DOM."),
+                includeHistory: z.boolean().optional().describe("Append the route trail — which screens the app has been on, most recent first, with dwell time and the route each was entered from. Recorded from connection time; an app restart shows an epoch divider. If no navigation listener could be attached the trail reports itself as sampled, meaning transitions between calls may be missing. Default false. Not recorded on chromium targets.")
             }
         },
         async ({ device, pressablesOnly, fullText, fullParams, includeHistory }) => {
+            const chromeApp = chromiumAppFor("get_screen_state", device);
+            if (chromeApp) {
+                return await chromiumText(async () => {
+                    const ss = await chromiumScreenState(chromeApp);
+                    return formatScreenStateSummary(ss, undefined, { pressablesOnly, fullText, fullParams });
+                });
+            }
             if (!await awaitMetro()) {
                 const hint = await metroMissingHintIfAbsent("get_screen_state");
                 return {
@@ -576,6 +602,11 @@ export function registerComponentTools(server: McpServer): void {
             }
         },
         async ({ x, y, includeProps, includeFrame, device, source = true }) => {
+            const chromeApp = chromiumAppFor("inspect_at_point", device);
+            if (chromeApp) {
+                return await chromiumText(async () =>
+                    `Element at (${x}, ${y}):\n\n${await chromiumInspectAtPoint(chromeApp, x, y, { includeProps, includeFrame })}`);
+            }
             const pointMetrics = await resolveScreenSpaceMetricsFor(device);
             const [result, keyboard] = await Promise.all([
                 inspectAtPoint(x, y, {
@@ -621,14 +652,22 @@ export function registerComponentTools(server: McpServer): void {
                 // If parsing fails, just return the raw result
             }
 
-            // Source resolution reuses the same hit-test point, so no extra
-            // coordinate translation is needed. Failure only adds a reason line.
+            // The source harvest hit-tests raw measureInWindow output, so the
+            // caller's delivered-pixel point has to be brought back to fiber space
+            // first. It used to receive the pixels unconverted and so tested a
+            // different spot than the frame and props above (on a 3x iPhone,
+            // (461, 1186) px landed below the 912-pt screen): the source and its
+            // ancestors described some other element, or nothing at all.
+            // Failure only adds a reason line.
             let sourceLine = "";
             if (source) {
-                const enriched = await enrichWithSource({}, await harvestStacksAtPoint(x, y, device));
+                const enriched = await enrichWithSource(
+                    {},
+                    await harvestStacksAtPoint(fromDeliveredPxX(x, pointMetrics), fromDeliveredPxY(y, pointMetrics), device)
+                );
                 const loc = enriched.source as { file: string; line: number; column: number } | undefined;
                 if (loc) {
-                    sourceLine = `\n\nSource: ${loc.file}:${loc.line}:${loc.column}`;
+                    sourceLine = `\n\nSource (where it is rendered): ${loc.file}:${loc.line}:${loc.column}`;
                     // The owner chain answers "which parent renders this?" — the one
                     // thing a single file:line cannot, and the reason to inspect at
                     // all when the innermost node is a shared primitive.
@@ -636,7 +675,11 @@ export function registerComponentTools(server: McpServer): void {
                         | Array<{ component: string; file: string; line: number }>
                         | undefined;
                     if (ancestors && ancestors.length > 1) {
-                        sourceLine += `\nSource ancestors:\n`;
+                        // Each line is where that component is RENDERED (the JSX in its
+                        // parent), not where it is defined. Unlabelled, a reader checking
+                        // `LabeledField  TapTargetsScreen.tsx:305` against the definition at
+                        // line 38 concluded the mapping was unreliable (benchmark S5).
+                        sourceLine += `\nSource ancestors (file:line where each component is rendered, i.e. its JSX in the parent; not its definition):\n`;
                         for (const a of ancestors) {
                             sourceLine += `  - ${a.component}  ${a.file}:${a.line}\n`;
                         }
@@ -697,6 +740,8 @@ export function registerComponentTools(server: McpServer): void {
             }
         },
         async ({ componentName, index, device }) => {
+            const chromeApp = chromiumAppFor("measure", device);
+            if (chromeApp) return await chromiumText(() => chromiumMeasure(chromeApp, componentName, index ?? 0));
             if (!await awaitMetro()) {
                 const hint = await metroMissingHintIfAbsent("measure");
                 return {

@@ -9,7 +9,7 @@
  *
  * Metro's dev registry does expose every loaded module keyed by numeric id,
  * with a `verboseName` path when the bundle is unminified. Verified live:
- * 4,398 named modules on astro-app and 4,116 on Boardwise, where
+ * 4,398 named modules on AppC and 4,116 on AppB, where
  * `node_modules/expo-router/build/imperative-api.js` resolved to id 1017 and
  * `__r(1017)` returned working exports.
  *

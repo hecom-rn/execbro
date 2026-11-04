@@ -15,7 +15,8 @@ import {
 import { androidTap, androidFindElement } from "../core/android.js";
 import { compareScreenshots, type DiffRegion } from "./screenshot-diff.js";
 import { scanMetroPorts, fetchDevices, selectMainDevice } from "../core/metro.js";
-import { connectToDevice, clearReconnectionSuppression, getConnectedAppByDevice } from "../core/connection.js";
+import { connectToDevice, clearReconnectionSuppression, getConnectedAppByDevice, chromiumAppFor } from "../core/connection.js";
+import { chromiumTap } from "./chromiumTap.js";
 import { resolveDeviceTarget, formatResolverError, checkNativeBackendAvailable } from "../core/deviceResolver.js";
 import { notifyDriverMissing } from "../core/logbox.js";
 import { captureFailureArtifact, type ArtifactOutcome, type CaptureSignals } from "../core/failureArtifact.js";
@@ -289,6 +290,8 @@ export interface TapResult {
     suggestion?: string;
     screenshot?: TapScreenshot;
     verification?: TapVerification;
+    /** chromium: a JavaScript dialog opened on this tap; the page is paused until handle_dialog answers it. */
+    dialog?: import("../core/chromiumDialogs.js").DialogInfo;
     warning?: string;
     deviceNote?: string;
     // Failure-artifact signals (populated by captureFailureArtifact when outcome warrants).
@@ -400,9 +403,20 @@ export async function buildSwitchReport(args: {
     return { before: args.before, after, changed };
 }
 
+const HTML_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", "#39": "'" };
+
+/**
+ * Agents sometimes escape the label they read ("Rose &amp; Tom"), and no screen
+ * shows a literal "&amp;". OCR saw the real text at 0.65-0.86 and still refused,
+ * so decoding here is the whole fix.
+ */
+export function decodeHtmlEntities(text: string): string {
+  return text.replace(/&(amp|lt|gt|quot|apos|#39);/g, (_, name: string) => HTML_ENTITIES[name]);
+}
+
 export function buildQuery(options: TapOptions): TapQuery {
   const query: TapQuery = {};
-  if (options.text !== undefined) query.text = options.text;
+  if (options.text !== undefined) query.text = decodeHtmlEntities(options.text);
   if (options.testID !== undefined) query.testID = options.testID;
   if (options.component !== undefined) query.component = options.component;
   if (options.x !== undefined) query.x = options.x;
@@ -1928,6 +1942,7 @@ async function diagnoseCoordinateMiss(args: {
         if (!ss.success || !ss.screenState) return undefined;
 
         const app = (args.deviceName ? getConnectedAppByDevice(args.deviceName) : null) ?? getFirstConnectedApp();
+        if (app?.platform === "chromium") return undefined;
         const metrics = await resolveScreenSpaceMetrics({
             platform: app?.platform ?? "ios",
             udid: app?.simulatorUdid,
@@ -2152,6 +2167,12 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         };
     }
 
+    // Chromium targets take a separate path: DOM lookup plus CDP mouse events.
+    // Asked the way the capability gate asks, so the two cannot disagree.
+    // native:true means the OS layer (a system dialog), which a chromium window does not have.
+    const chromiumApp = options.native ? null : chromiumAppFor("tap", options.device);
+    if (chromiumApp) return chromiumTap(chromiumApp, query, options);
+
     // Native mode: bypass React Native connection, tap directly via simctl/adb/hdc
     if (options.native && hasCoordinates) {
         const nativeResolved = await resolveDeviceTarget(options.device);
@@ -2224,7 +2245,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                         reason: err instanceof Error ? err.message : String(err)
                     }
                 ],
-                suggestion: `Tap timed out. Take a screenshot (${platform === "ios" ? "ios_screenshot" : platform === "harmony" ? "harmony_screenshot" : "android_screenshot"}) and retry with coordinates.`
+                suggestion: `Tap timed out. Call screenshot and retry with coordinates.`
             });
         }
         if (result.success) {
@@ -2277,7 +2298,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
         return formatTapFailure({
             query,
             attempted: [{ strategy: "native-coordinate", reason: result.reason }],
-            suggestion: `Take a screenshot (${platform === "ios" ? "ios_screenshot" : platform === "harmony" ? "harmony_screenshot" : "android_screenshot"}) to verify coordinates.`
+            suggestion: `Call screenshot to verify coordinates.`
         });
     }
 
@@ -2306,7 +2327,8 @@ export async function tap(options: TapOptions): Promise<TapResult> {
     // entry whose identifier matches the resolved target; fall back to a
     // device-name match (handy when registry entries lack identifiers yet);
     // last resort is the first connected app on the matching platform.
-    const allApps = Array.from(connectedApps.values());
+    // Native (execbro-sdk-android) apps have no fiber tree or Metro: never a tap strategy target.
+    const allApps = Array.from(connectedApps.values()).filter((a) => a.runtime !== "native");
     let hasMetro = allApps.length > 0;
     let app: ConnectedApp | undefined;
     if (resolved.target.iosUdid) {
@@ -2347,7 +2369,7 @@ export async function tap(options: TapOptions): Promise<TapResult> {
                 Math.min(remainingMs(), 3000),
                 "auto-connect"
             );
-            const apps = Array.from(connectedApps.values());
+            const apps = Array.from(connectedApps.values()).filter((a) => a.runtime !== "native");
             hasMetro = apps.length > 0;
             app = apps.find((a) => a.platform === platform) ?? apps[0];
             if (platform === "ios" && !targetUdid) {
@@ -3138,7 +3160,7 @@ function buildSuggestion(query: TapQuery, triedStrategies: string[], platform: s
     }
 
     suggestions.push(
-        `Take a screenshot (${platform === "ios" ? "ios_screenshot" : "android_screenshot"}) ` +
+        `Call screenshot ` +
             "to verify the element is visible, then use x/y coordinates"
     );
 

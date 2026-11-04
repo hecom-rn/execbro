@@ -55,6 +55,7 @@ jest.unstable_mockModule("../../core/exec.js", () => ({
 }));
 
 jest.unstable_mockModule("../../core/deviceResolver.js", () => ({
+    checkNativeBackendAvailable: () => null,
     resolveDeviceTarget: async () => ({
         ok: true,
         target: {

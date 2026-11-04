@@ -9,11 +9,14 @@ import {
     isTelemetryEnabled,
 } from "./telemetry.js";
 import { getTargetPlatform } from "./state.js";
-import { resolveConnectedAppByDevice } from "./connection.js";
+import { resolveConnectedAppByDevice, peekTargetApp, dialogGateFor } from "./connection.js";
+import { nativeGate } from "./nativeCapabilities.js";
+import { chromiumGate } from "./chromiumCapabilities.js";
 import { recordToolCall } from "./screenStaleness.js";
+import { recordAction } from "./actionLog.js";
 import { EnvironmentError, UserInputError, type FailureKind } from "./errors.js";
 import { estimateImageTokens } from "./toolHelpers.js";
-import { redactSecrets, redactionEnabled } from "./redact.js";
+import { containsCredential, redactSecrets, redactionEnabled, REDACTION_OFF_NOTE } from "./redact.js";
 import { connectedApps, shouldShowFeedbackHint, markFeedbackHintShown, pushLogBox } from "./index.js";
 import { ensureLicense, getUsageInfo } from "./license.js";
 import { freezeSessionVerdict, isToolBlocked, usageWarningLine } from "../pro/usageGate.js";
@@ -130,6 +133,9 @@ export function registerToolWithTelemetry(
         let fiberPressableCount: string | undefined;
         let accessibilityMatchCount: string | undefined;
         let appRoute: string | undefined;
+        // Set by cross-platform tools that resolve their own target (e.g. `screenshot` on a
+        // simulator with no app connected), where invocationPlatform has nothing to read.
+        let resolvedPlatform: string | undefined;
 
         try {
             inputTokens = Math.ceil(JSON.stringify(args).length / 4);
@@ -138,7 +144,16 @@ export function registerToolWithTelemetry(
         }
 
         try {
-            const result = await handler(args);
+            // Chromium capability gate. Inside the try so a refusal is recorded
+            // in telemetry as a returned failure: that count is how we learn
+            // which unsupported tool agents reach for first on desktop.
+            const target = peekTargetApp(toolName, args?.device);
+            // Native apps report their own platform value, so dashboards can split them from React Native on Android.
+            if (target?.runtime === "native") resolvedPlatform = "android-native";
+            const result = chromiumGate(toolName, target?.platform)
+                ?? nativeGate(toolName, target?.runtime)
+                ?? dialogGateFor(toolName, args?.device)
+                ?? await handler(args);
             // Secret redaction, applied once for every tool rather than at each
             // render site. Runs before anything else reads the text, so the
             // token accounting and the dev-mode JSONL on disk both see the
@@ -161,6 +176,11 @@ export function registerToolWithTelemetry(
                         item.text = redactSecrets(item.text);
                     }
                 }
+            } else if (Array.isArray(result?.content)
+                && result.content.some((item: any) => item.type === "text" && typeof item.text === "string" && containsCredential(item.text))) {
+                // One line per result, not per header: the human chose this,
+                // the agent just needs to know before it quotes a token.
+                result.content.push({ type: "text", text: REDACTION_OFF_NOTE });
             }
             // Check if result indicates an error
             if (result?.isError) {
@@ -208,6 +228,7 @@ export function registerToolWithTelemetry(
             if (result?._fiberPressableCount) fiberPressableCount = result._fiberPressableCount;
             if (result?._accessibilityMatchCount) accessibilityMatchCount = result._accessibilityMatchCount;
             if (result?._appRoute) appRoute = result._appRoute;
+            if (result?._targetPlatform) resolvedPlatform = result._targetPlatform;
             if (Array.isArray(result?.content)) {
                 let totalTokens = 0;
                 for (const item of result.content) {
@@ -295,7 +316,10 @@ export function registerToolWithTelemetry(
             // PREVIOUS tool — which is what screenStaleness needs to tell
             // "the agent moved the screen" from "someone else did".
             recordToolCall(toolName);
-            const targetPlatform = invocationPlatform(toolName, args);
+            // After redaction above, so a failure reason carries no credential.
+            // Synchronous and self-guarded: the timeline must never cost a call.
+            recordAction({ tool: toolName, args, startedAt: startTime, endedAt: Date.now(), ok: success, error: errorMessage, meaningful });
+            const targetPlatform = resolvedPlatform ?? invocationPlatform(toolName, args);
             trackToolInvocation(toolName, success, duration, errorMessage, errorContext, inputTokens, outputTokens, targetPlatform, emptyResult, meaningful, changeRate, tapStrategy, iosDriver, responsePreview, emptyReason, artifactKey, ocrClosestMatch, fiberPressableCount, accessibilityMatchCount, appRoute, errorOrigin, failureKind);
             // Classify this invocation's platform kind so PostHog breakdowns can split RN vs Native.
             // RN: any connected app has appDetection. Native: tool name prefixed ios_/android_. Else: null.

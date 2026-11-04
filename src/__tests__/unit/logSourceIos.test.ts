@@ -36,9 +36,9 @@ describe("buildLogShowCommand", () => {
         // made IOS_VERDICT_SUBSYSTEMS unreachable and the advertised "surfaces
         // crashes and OOM kills" false on iOS. Measured: 9 such lines about
         // the app in a 2-minute window, all dropped.
-        const predicate = buildLogShowCommand({ udid: UDID, processName: "Gifted" })
+        const predicate = buildLogShowCommand({ udid: UDID, processName: "AppA" })
             .find((a) => a.includes("process =="))!;
-        expect(predicate).toContain(`process == "Gifted"`);
+        expect(predicate).toContain(`process == "AppA"`);
         expect(predicate).toContain("com.apple.runningboard");
         expect(predicate).toContain("OR");
     });
