@@ -253,6 +253,11 @@ export function cancelAllReconnectionTimers(): void {
     }
 }
 
+/** Forget one connection's state and gaps: its target is gone for good (a closed chromium window). */
+export function clearConnectionState(appKey: string): void {
+    connectionStates.delete(appKey);
+}
+
 /**
  * Clear all connection state (for cleanup)
  */
@@ -391,7 +396,9 @@ export type ConnectionEventType =
     | "reconnect-failed"
     | "max-attempts-reached"
     | "reconnect-suppressed"
-    | "metro-down";
+    | "displaced"
+    | "metro-down"
+    | "window-closed";
 
 export interface ConnectionEvent {
     timestamp: Date;

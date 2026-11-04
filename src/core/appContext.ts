@@ -1,4 +1,5 @@
 import { buildRequireSource } from "./moduleRegistry.js";
+import { FIBER_ROOTS_JS } from "./injected/fiberRoots.js";
 
 /**
  * RESOLUTION ORDER — read this before adding a new handle to the context.
@@ -17,7 +18,7 @@ import { buildRequireSource } from "./moduleRegistry.js";
  *   3. Fiber tree — anything passed as props or context. Resolves the redux
  *      store and React Navigation refs.
  *   4. Known globals and the SDK registry — cheap, but app-specific and often
- *      absent or, worse, a bespoke wrapper (Boardwise's `__EXPO_ROUTER__` is
+ *      absent or, worse, a bespoke wrapper (AppB's `__EXPO_ROUTER__` is
  *      not the library's `router`).
  *   5. Introspection of live internals — last resort. Apollo's auth link is a
  *      closure over an async getter; Zustand stores are module-scoped hooks and
@@ -49,8 +50,8 @@ export const CONTEXT_BINDINGS = [
  *
  * Motivated by telemetry, not ergonomics: store resolution is the single
  * largest failure cause for the redux tools (33 of 103 failures), because no
- * one strategy works across apps — `__REDUX_STORE__` exists in Boardwise and
- * astro but not gifted, while gifted has the SDK registry. Agents work around
+ * one strategy works across apps — `__REDUX_STORE__` exists in AppB and
+ * AppC but not AppA, while AppA has the SDK registry. Agents work around
  * it by hand-writing `__REDUX_STORE__ || __RN_AI_DEVTOOLS__.stores.redux`
  * fallback chains, and one recorded call was spent entirely on
  * `Object.keys(globalThis).filter(k => k.includes('REDUX'))`.
@@ -66,17 +67,18 @@ export const CONTEXT_BINDINGS = [
 export function buildContextPreamble(): string {
     return `
 ${buildRequireSource()}
-// Expose under the natural name too. Hermes has no require in the evaluate
-// scope, so this shadows nothing, and var keeps it local to the evaluated
-// program rather than mutating globalThis.
-var require = __eb_require;
+// Expose under the natural name too, only where the runtime has none. Hermes
+// has no require in the evaluate scope. A browser page may (Electron with
+// nodeIntegration, AMD loaders), and a top-level var there IS a property of
+// window, so an unguarded assignment replaced the app's own require.
+// The __eb tag keeps our own from a previous call replaceable: each call's
+// __eb_require re-indexes Metro modules, so a pinned one would go stale.
+__eb_require.__eb = true;
+var require = typeof require !== 'undefined' && !require.__eb ? require : __eb_require;
+${FIBER_ROOTS_JS}
 var __eb_fiberFind = function (predicate) {
     try {
-        var hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
-        if (!hook || typeof hook.getFiberRoots !== 'function' || !hook.renderers) return null;
         var found = null;
-        var ids = [];
-        hook.renderers.forEach(function (_, k) { ids.push(k); });
         var walk = function (f, d) {
             if (!f || d > 1600 || found) return;
             var p = f.memoizedProps;
@@ -87,11 +89,7 @@ var __eb_fiberFind = function (predicate) {
             if (f.child) walk(f.child, d + 1);
             if (f.sibling) walk(f.sibling, d);
         };
-        for (var i = 0; i < ids.length; i++) {
-            var roots = hook.getFiberRoots(ids[i]);
-            if (!roots) continue;
-            roots.forEach(function (r) { walk(r.current, 0); });
-        }
+        __eb_fiberRoots(true).forEach(function (r) { walk(r.current, 0); });
         return found;
     } catch (e) { return null; }
 };

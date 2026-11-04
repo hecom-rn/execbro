@@ -5,6 +5,7 @@ import type { RawComponentStack } from "./componentSource.js";
 import { RN_PRIMITIVES_SRC, GENERIC_COMPONENT_SRC } from "./injectedFilters.js";
 import { SCREEN_SPACE_HELPER_JS, type ScreenSpaceMetrics } from "./screenSpace.js";
 import { SHEET_HELPERS_JS } from "./injected/sheetOffset.js";
+import { FIBER_ROOTS_JS } from "./injected/fiberRoots.js";
 
 // ============================================================================
 // Coordinate-Based Element Inspection (via DevTools Inspector API)
@@ -19,13 +20,8 @@ export async function isInspectorActive(device?: string): Promise<boolean> {
             const hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
             if (!hook) return false;
 
-            let roots = [...(hook.getFiberRoots?.(1) || [])];
-            if (roots.length === 0) {
-                for (const [id] of (hook.renderers || [])) {
-                    roots = [...(hook.getFiberRoots?.(id) || [])];
-                    if (roots.length > 0) break;
-                }
-            }
+            ${FIBER_ROOTS_JS}
+            const roots = __eb_fiberRoots(false);
             if (roots.length === 0) return false;
 
             function findComponent(fiber, targetName, depth = 0) {
@@ -89,21 +85,9 @@ export async function inspectAtPoint(
     const expression = `
         new Promise(function(resolve) {
             var hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
-            if (!hook) return resolve({ error: 'React DevTools hook not available. Make sure you are running a development build.' });
-
-            var roots = [];
-            if (hook.getFiberRoots) {
-                try { roots = Array.from(hook.getFiberRoots(1) || []); } catch(e) {}
-            }
-            if (roots.length === 0 && hook.renderers) {
-                for (var entry of hook.renderers) {
-                    try {
-                        var r = Array.from(hook.getFiberRoots ? (hook.getFiberRoots(entry[0]) || []) : []);
-                        if (r.length > 0) { roots = r; break; }
-                    } catch(e) {}
-                }
-            }
-            if (roots.length === 0) return resolve({ error: 'No fiber roots found. The app may not have rendered yet.' });
+            ${FIBER_ROOTS_JS}
+            var roots = __eb_fiberRoots(false);
+            if (roots.length === 0) return resolve({ error: __eb_noRootsReason() });
 
             // Paper: measureInWindow is on stateNode directly.
             // Fabric: measureInWindow is on stateNode.canonical.publicInstance.
@@ -136,8 +120,8 @@ export async function inspectAtPoint(
             // (500 hosts / depth 250) did: on a mid-size Expo app 45% of measurable hosts fell
             // outside them (914 -> 500), and because the hit-test then silently ran against the
             // survivors, inspect_at_point returned components from the screen *underneath* an
-            // open modal. Real measurements: test-app 200 hosts / depth 255, gifted 201 / 252,
-            // Boardwise 914 / 281. Anything that trips these limits now reports it.
+            // open modal. Real measurements: test-app 200 hosts / depth 255, AppA 201 / 252,
+            // AppB 914 / 281. Anything that trips these limits now reports it.
             var MAX_HOSTS = 20000;
             var MAX_DEPTH = 2000;
             var truncatedByCount = false;

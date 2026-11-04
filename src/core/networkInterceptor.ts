@@ -26,7 +26,7 @@ export const RESPONSE_BODY_CAP = 32 * 1024;
  * request headers, request body, response headers, response body,
  * content type, and the post-redirect URL.
  */
-export function getInterceptorScript(): string {
+export function getInterceptorScript(nativeFetch = false): string {
     // Two-phase injection to capture both early and late requests:
     // Phase 1 (sync): Set __RN_NET_INJECTED__ flag and define helper functions.
     //   Patch XMLHttpRequest.prototype (this is the path axios takes).
@@ -36,17 +36,28 @@ export function getInterceptorScript(): string {
     return `(function() { try {
     if (globalThis.__RN_NET_INJECTED__) return;
     globalThis.__RN_NET_INJECTED__ = true;
+    // Capability flag for GraphQL operation rules. The guard above keeps an
+    // older interceptor in place for the life of the JS context, and that one
+    // ignores rule.operation, so it would mock EVERY request on the url. The
+    // push script holds operation rules back until this flag is present.
+    globalThis.__RN_NET_MOCK_OPS__ = true;
 
     var _counter = 0;
     var _prefix = 'js-' + Math.random().toString(36).substring(2, 6) + '-';
     var _REQ_CAP = ${REQUEST_BODY_CAP};
     var _RES_CAP = ${RESPONSE_BODY_CAP};
+    // True only on chromium targets, where fetch is native and bypasses XHR.
+    var _NATIVE_FETCH = ${nativeFetch ? "true" : "false"};
 
     function _genId() {
       return _prefix + (++_counter);
     }
 
     function _report(evt) {
+      // Mocked traffic never reaches the SDK (it patches XHR at this same
+      // layer, and a mock returns before calling through), so it is reported
+      // even when the SDK is the source of truth.
+      if (evt && evt.mocked) { _reportAlways(evt); return; }
       // Suppressed when the in-app SDK is the source of truth — the MCP
       // flips this flag via Runtime.evaluate once it detects the SDK global,
       // so the wrapper stops emitting debug lines and CDP traffic.
@@ -165,27 +176,55 @@ export function getInterceptorScript(): string {
     // a re-injection into a live context must not drop them.
     if (!globalThis.__RN_NET_MOCKS__) globalThis.__RN_NET_MOCKS__ = [];
 
-    function _ruleMatches(rule, method, url) {
+    // Mirrors parseGraphQLOperation (graphqlOperation.ts): operationName wins,
+    // else the name in the document. A batched array body names several
+    // operations and gets one response, so it matches no operation rule.
+    function _gqlOperation(url, body) {
+      if (typeof body === 'string' && body) {
+        var p = null;
+        try { p = JSON.parse(body); } catch (e) {}
+        if (p && typeof p === 'object' && !Array.isArray(p)) {
+          if (typeof p.operationName === 'string' && p.operationName) return p.operationName;
+          if (typeof p.query === 'string') {
+            var named = /(?:^|[\\s{}])(?:query|mutation|subscription)\\s+([_A-Za-z][_0-9A-Za-z]*)/.exec(p.query);
+            if (named) return named[1];
+          }
+        }
+      }
+      // GET transport (Apollo useGETForQueries, persisted queries).
+      var q = /[?&]operationName=([^&#]*)/.exec(url);
+      if (q) { try { return decodeURIComponent(q[1]); } catch (e) { return q[1]; } }
+      return null;
+    }
+
+    function _ruleMatches(rule, method, url, body) {
       try {
         if (rule.method && String(rule.method).toUpperCase() !== method) return false;
         var pat = String(rule.url === undefined || rule.url === null ? '' : rule.url);
+        var urlOk;
         if (pat.length > 1 && pat.charAt(0) === '/' && pat.charAt(pat.length - 1) === '/') {
           // Slash-wrapped means regex. Compiled per call rather than cached:
           // the rule list is short and re-pushed on every context creation.
           // The server rejects catastrophic patterns before they get here.
-          return new RegExp(pat.slice(1, -1)).test(url);
+          urlOk = new RegExp(pat.slice(1, -1)).test(url);
+        } else {
+          urlOk = url.indexOf(pat) !== -1;
         }
-        return url.indexOf(pat) !== -1;
+        if (!urlOk) return false;
+        // Every GraphQL call shares one URL, so the operation is the only
+        // thing that tells them apart. Parsed only when a rule asks for it.
+        if (rule.operation) return _gqlOperation(url, body) === rule.operation;
+        return true;
       } catch (e) { return false; }
     }
 
-    function _matchRule(method, url) {
+    function _matchRule(method, url, body) {
       var rules = globalThis.__RN_NET_MOCKS__;
       if (!rules || !rules.length) return null;
       for (var i = 0; i < rules.length; i++) {
         var r = rules[i];
         if (!r || r.__spent) continue;
-        if (_ruleMatches(r, method, url)) {
+        if (_ruleMatches(r, method, url, body)) {
           if (typeof r.times === 'number') {
             r.__used = (r.__used || 0) + 1;
             if (r.__used >= r.times) r.__spent = true;
@@ -492,7 +531,8 @@ export function getInterceptorScript(): string {
             var s = _getState(self);
             if (s && !s.done && s.start === 0) {
               s.start = Date.now();
-              var _rule = _matchRule(s.method, s.url);
+              var bodyText = _bodyToString(body);
+              var _rule = _matchRule(s.method, s.url, bodyText);
 
               _report({
                 type: 'request',
@@ -501,7 +541,7 @@ export function getInterceptorScript(): string {
                 url: s.url,
                 timestamp: s.start,
                 headers: s.headers,
-                body: _cap(_bodyToString(body), _REQ_CAP),
+                body: _cap(bodyText, _REQ_CAP),
                 // Tells the server this request will never reach the wire, so
                 // the CDP Network domain cannot possibly report it and the
                 // usual dedupe gate must not drop ours. Without it a mocked
@@ -578,11 +618,98 @@ export function getInterceptorScript(): string {
       } catch(e) { return false; }
     }
 
+    /**
+     * Mocks one call to a NATIVE fetch (a browser page). Only reached when the
+     * server injected with nativeFetch: on React Native fetch rides on XHR and
+     * the XHR layer already mocks it, so matching here too would mock twice.
+     *
+     * Emits the same request / mock / response|error sequence as the XHR path,
+     * so the server side needs no fetch-specific handling.
+     */
+    function _mockFetch(origFetch, args, rule, method, url, input, init) {
+      var id = _genId();
+      var start = Date.now();
+      var headers = {};
+      try {
+        var h = new Headers((init && init.headers) || (input && typeof input === 'object' && input.headers) || undefined);
+        h.forEach(function(v, k) { headers[k] = v; });
+      } catch (e) {}
+      _report({
+        type: 'request', id: id, method: method, url: url, timestamp: start, headers: headers,
+        body: _cap(_bodyToString(init && init.body), _REQ_CAP), mocked: true
+      });
+      var delay = (typeof rule.delayMs === 'number' && rule.delayMs > 0) ? rule.delayMs : 0;
+      var wait = function() { return new Promise(function(r) { setTimeout(r, delay); }); };
+      var fail = function(msg, warning) {
+        _reportAlways({ type: 'mock', id: id, ruleId: rule.id, warning: warning });
+        _report({ type: 'error', id: id, error: msg, duration: Date.now() - start, mocked: true });
+        throw new TypeError(msg);
+      };
+      var respond = function(text, status, statusText, headersInit, warning) {
+        // The Response constructor throws on a body for these statuses.
+        var nullBody = status === 101 || status === 204 || status === 205 || status === 304;
+        var res;
+        try {
+          res = new Response(nullBody ? null : text, { status: status, statusText: statusText || '', headers: headersInit || {} });
+        } catch (e) {
+          return fail('Mock response rejected: ' + String(e && e.message ? e.message : e),
+            'status ' + status + ' cannot be delivered through fetch');
+        }
+        try { Object.defineProperty(res, 'url', { value: url }); } catch (e) {}
+        var rh = {};
+        try { res.headers.forEach(function(v, k) { rh[k] = v; }); } catch (e) {}
+        _reportAlways({ type: 'mock', id: id, ruleId: rule.id, warning: warning });
+        var evt = {
+          type: 'response', id: id, status: status, statusText: statusText || '',
+          duration: Date.now() - start, responseHeaders: rh,
+          body: _cap(nullBody ? '' : text, _RES_CAP), mocked: true
+        };
+        if (rh['content-type']) evt.mimeType = rh['content-type'];
+        _report(evt);
+        return res;
+      };
+
+      if (rule.networkError) {
+        return wait().then(function() { return fail(String(rule.networkError)); });
+      }
+      if (rule.mode === 'tamper') {
+        return origFetch.apply(globalThis, args).then(
+          function(real) {
+            return real.text().then(function(realText) {
+              var out = _applyTamper(rule, realText);
+              var rh = {};
+              try { real.headers.forEach(function(v, k) { rh[k] = v; }); } catch (e) {}
+              var status = (typeof rule.status === 'number') ? rule.status : real.status;
+              return wait().then(function() { return respond(out.body, status, real.statusText, rh, out.warning); });
+            });
+          },
+          function() {
+            return wait().then(function() { return fail('Failed to fetch', 'shadow request failed'); });
+          }
+        );
+      }
+      var body = (rule.body === null || rule.body === undefined) ? '' : String(rule.body);
+      var status = (typeof rule.status === 'number') ? rule.status : 200;
+      return wait().then(function() { return respond(body, status, '', rule.headers); });
+    }
+
     function _wrapFetch(origFetch) {
       if (typeof origFetch !== 'function') return origFetch;
       if (origFetch.__rn_net_wrapped__) return origFetch;
 
       var wrapped = function(input, init) {
+        if (_NATIVE_FETCH) {
+          try {
+            var mMethod = String((init && init.method) || (input && typeof input === 'object' && input.method) || 'GET').toUpperCase();
+            var mUrl = (input && typeof input === 'object' && input.url) ? String(input.url) : String(input);
+            // CDP rows show absolute URLs, which is what a rule is copied from.
+            try { mUrl = new URL(mUrl, globalThis.location && globalThis.location.href).href; } catch (e) {}
+            // A Request object's body is a stream, unreadable synchronously,
+            // so an operation rule matches only an init.body string.
+            var mRule = _matchRule(mMethod, mUrl, init && init.body);
+          } catch (e) { mRule = null; }
+          if (mRule) return _mockFetch(origFetch, arguments, mRule, mMethod, mUrl, input, init);
+        }
         // Decided once per call, not per report: if the XHR patch lands
         // mid-flight, a request whose start was reported here must still
         // have its response reported here, or it hangs as 'pending' forever.
@@ -696,9 +823,11 @@ export function getInterceptorScript(): string {
  * legitimately rearms every budget — a reload is a new app run.
  */
 export function buildMockPushScript(rulesJson: string): string {
-    return `(function(){ try {
+    return `(function(){
+  function __eb_supported(r) { return !r.operation || !!globalThis.__RN_NET_MOCK_OPS__; }
+  try {
   var __eb_prev = globalThis.__RN_NET_MOCKS__ || [];
-  var __eb_next = ${rulesJson};
+  var __eb_next = ${rulesJson}.filter(__eb_supported);
   var __eb_byId = {};
   for (var __eb_i = 0; __eb_i < __eb_prev.length; __eb_i++) {
     if (__eb_prev[__eb_i] && __eb_prev[__eb_i].id) __eb_byId[__eb_prev[__eb_i].id] = __eb_prev[__eb_i];
@@ -711,7 +840,7 @@ export function buildMockPushScript(rulesJson: string): string {
     }
   }
   globalThis.__RN_NET_MOCKS__ = __eb_next;
-} catch(e) { try { globalThis.__RN_NET_MOCKS__ = ${rulesJson}; } catch(e2) {} } })();`;
+} catch(e) { try { globalThis.__RN_NET_MOCKS__ = ${rulesJson}.filter(__eb_supported); } catch(e2) {} } })();`;
 }
 
 /**
@@ -732,13 +861,17 @@ export function pushMockRules(ws: WebSocket, rulesJson: string): void {
 /**
  * Injects the network interceptor script into the app via Runtime.evaluate.
  * Fire-and-forget — does not wait for a response.
+ *
+ * `nativeFetch` is true for chromium targets: their fetch is native, so the
+ * mock layer has to intercept it directly. Never true for React Native, whose
+ * fetch rides on XHR and is already mocked there.
  */
-export function injectNetworkInterceptor(ws: WebSocket): void {
+export function injectNetworkInterceptor(ws: WebSocket, nativeFetch = false): void {
     const message = JSON.stringify({
         id: getNextMessageId(),
         method: "Runtime.evaluate",
         params: {
-            expression: getInterceptorScript(),
+            expression: getInterceptorScript(nativeFetch),
             silent: true,
         },
     });
@@ -804,9 +937,8 @@ export function isMockEvent(jsonStr: string): boolean {
  * dedupe gate to them drops the only record that exists, and a mocked request
  * disappears from get_network_requests entirely on every CDP-capture target.
  *
- * The in-app SDK is a different case and needs no exemption: it wraps fetch
- * above the XHR layer, so it observes the mocked call itself, and these events
- * are suppressed app-side before they are ever emitted.
+ * The in-app SDK needs the same exemption: it patches XMLHttpRequest at the
+ * interceptor's own layer, and a mock returns before the SDK's send runs.
  */
 export function isMockedTrafficEvent(jsonStr: string): boolean {
     try {
@@ -869,6 +1001,8 @@ export function applyInterceptedEvent(
             postData: typeof event.body === "string" ? event.body : undefined,
             completed: false,
             epoch: getEpoch(deviceName),
+            capturedBy: "interceptor",
+            ...(event.mocked === true && { mocked: true }),
         };
         networkBuffer.set(id, request);
     } else if (type === "response") {

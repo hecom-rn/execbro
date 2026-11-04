@@ -1,7 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { peekTargetApp, dialogGateFor } from "./connection.js";
+import { nativeGate } from "./nativeCapabilities.js";
+import { chromiumGate } from "./chromiumCapabilities.js";
 import { recordToolCall } from "./screenStaleness.js";
+import { recordAction } from "./actionLog.js";
+import { containsCredential, redactSecrets, redactionEnabled, REDACTION_OFF_NOTE } from "./redact.js";
 import { shouldShowFeedbackHint, markFeedbackHintShown, pushLogBox } from "./index.js";
-import { redactSecrets, redactionEnabled } from "./redact.js";
 
 // Tools that do NOT require an active Metro connection — excluded from feedback hint trigger
 const NON_METRO_TOOLS = new Set([
@@ -38,9 +42,10 @@ export function installToolRegistryInterceptor(server: McpServer): void {
 }
 
 // The name is historical: this wrapper no longer reports telemetry. It now only
-// keeps the per-invocation side effects that are product behaviour — screen
-// staleness attribution and the first-install feedback hint — and propagates
-// handler results/exceptions unchanged.
+// keeps the per-invocation side effects that are product behaviour — capability
+// gating, secret redaction, screen staleness attribution, the first-install
+// feedback hint and the local action log that get_timeline reads — and
+// propagates handler results/exceptions unchanged.
 export function registerToolWithTelemetry(
     server: McpServer,
     toolName: string,
@@ -51,8 +56,22 @@ export function registerToolWithTelemetry(
     void emptyResultDetector;
     toolRegistry.set(toolName, { config, handler });
     server.registerTool(toolName, config, async (args: any) => {
+        const startTime = Date.now();
+        let success = true;
+        let errorMessage: string | undefined;
+        let meaningful: boolean | undefined;
         try {
-            const result = await handler(args);
+            // Capability gates, checked in order: what a chromium target
+            // supports, what a native Android app supports, and whether a
+            // JavaScript dialog is holding the app open. The first that applies
+            // returns a refusal instead of the handler's result. Inside the try
+            // so a refusal flows through the same redaction and action-log
+            // paths as any other result.
+            const target = peekTargetApp(toolName, args?.device);
+            const result = chromiumGate(toolName, target?.platform)
+                ?? nativeGate(toolName, target?.runtime)
+                ?? dialogGateFor(toolName, args?.device)
+                ?? await handler(args);
             // Secret redaction, applied once for every tool rather than at each
             // render site. Runs before anything else reads the text.
             //
@@ -73,6 +92,19 @@ export function registerToolWithTelemetry(
                         item.text = redactSecrets(item.text);
                     }
                 }
+            } else if (Array.isArray(result?.content)
+                && result.content.some((item: any) => item.type === "text" && typeof item.text === "string" && containsCredential(item.text))) {
+                // One line per result, not per header: the human chose this,
+                // the agent just needs to know before it quotes a token.
+                result.content.push({ type: "text", text: REDACTION_OFF_NOTE });
+            }
+            // Tap verification reports whether the screen actually changed;
+            // the local action log records it for get_timeline.
+            if (result?._meaningful !== undefined) meaningful = result._meaningful;
+            // A returned (handled) failure: capture the reason for the timeline.
+            if (result?.isError) {
+                success = false;
+                errorMessage = result._errorMessage || result.content?.[0]?.text || "Unknown error";
             }
             // First-install feedback hint — fires once on first successful Metro-connected tool
             if (!NON_METRO_TOOLS.has(toolName) && shouldShowFeedbackHint()) {
@@ -88,12 +120,23 @@ export function registerToolWithTelemetry(
                 });
             }
             return result;
+        } catch (error) {
+            success = false;
+            errorMessage = error instanceof Error ? error.message : String(error);
+            throw error;
         } finally {
             // Attribute the NEXT tool's screen changes. Recorded in `finally` so
             // that while a handler runs this still names the PREVIOUS tool —
             // which is what screenStaleness needs to tell "the agent moved the
             // screen" from "someone else did".
             recordToolCall(toolName);
+            // Local action log for get_timeline. After the redaction above, so a
+            // failure reason carries no credential. Synchronous and
+            // self-guarded: the timeline must never cost a call.
+            if (errorMessage && redactionEnabled()) {
+                errorMessage = redactSecrets(errorMessage, { catalog: false });
+            }
+            recordAction({ tool: toolName, args, startedAt: startTime, endedAt: Date.now(), ok: success, error: errorMessage, meaningful });
         }
     });
 }

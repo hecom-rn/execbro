@@ -93,14 +93,14 @@ export function parseDetectionResult(
  * a device appears there is proof of an RN app. Description/title strings
  * reliably identify Bridgeless (new arch) and Hermes setups.
  */
-function inferPresumptiveDetection(app: ConnectedApp): AppDetectionResult {
+function inferPresumptiveDetection(app: ConnectedApp, platform: DevicePlatform): AppDetectionResult {
     const desc = app.deviceInfo.description || "";
     const title = app.deviceInfo.title || "";
     return {
         reactNativeVersion: "unknown",
         architecture: desc.includes("Bridgeless") ? "new" : "old",
         jsEngine: title.includes("Hermes") ? "hermes" : "jsc",
-        appPlatform: app.platform,
+        appPlatform: platform,
         osVersion: "unknown",
         detectionSource: "device-info",
     };
@@ -117,13 +117,19 @@ function inferPresumptiveDetection(app: ConnectedApp): AppDetectionResult {
  * result when it succeeds.
  */
 export function scheduleAppDetection(app: ConnectedApp): void {
+    // RN version/arch/engine detection means nothing in a browser renderer, and
+    // its app_detected event would count an Electron window as an RN install.
+    if (app.platform === "chromium") return;
+    const platform = app.platform;
+
     // Probe already succeeded — nothing to do.
     if (app.appDetection?.detectionSource === "probe") return;
 
     // Fire presumptive event once per ConnectedApp so the user is classified as
     // RN at the moment of connect, independent of probe success.
     if (!app.appDetection) {
-        app.appDetection = inferPresumptiveDetection(app);
+        const presumptive = inferPresumptiveDetection(app, platform);
+        app.appDetection = presumptive;
     }
 
     app.appDetectionPromise = new Promise<void>((resolve) => {
@@ -131,7 +137,7 @@ export function scheduleAppDetection(app: ConnectedApp): void {
             try {
                 const result = await detectApp(app.ws);
                 if (result) {
-                    const parsed = parseDetectionResult(result, app.platform);
+                    const parsed = parseDetectionResult(result, platform);
                     if (parsed) {
                         parsed.detectionSource = "probe";
                         app.appDetection = parsed;

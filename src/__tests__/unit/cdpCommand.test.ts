@@ -1,0 +1,93 @@
+import { describe, it, expect } from "@jest/globals";
+import { EventEmitter } from "node:events";
+import type WebSocket from "ws";
+import { sendCdpCommand, evaluateJson } from "../../core/cdpCommand.js";
+import { noteDialogOpened } from "../../core/chromiumDialogs.js";
+
+class FakeWs extends EventEmitter {
+    sent: Array<{ id: number; method: string; params: unknown }> = [];
+    send(s: string) { this.sent.push(JSON.parse(s)); }
+    reply(msg: unknown) { this.emit("message", Buffer.from(JSON.stringify(msg))); }
+}
+const asWs = (f: FakeWs) => f as unknown as WebSocket;
+
+describe("sendCdpCommand", () => {
+    it("resolves with the result of the response carrying its own id, ignoring others", async () => {
+        const ws = new FakeWs();
+        const p = sendCdpCommand<{ data: string }>(asWs(ws), "Page.captureScreenshot", { format: "png" });
+        const { id, method, params } = ws.sent[0];
+        expect(method).toBe("Page.captureScreenshot");
+        expect(params).toEqual({ format: "png" });
+        ws.reply({ id: id + 1000, result: { data: "wrong" } });
+        ws.reply({ method: "Runtime.consoleAPICalled", params: {} });
+        ws.reply({ id, result: { data: "abc" } });
+        await expect(p).resolves.toEqual({ data: "abc" });
+        expect(ws.listenerCount("message")).toBe(0);
+    });
+
+    it("rejects with the CDP error message, naming the method", async () => {
+        const ws = new FakeWs();
+        const p = sendCdpCommand(asWs(ws), "Input.insertText", { text: "x" });
+        ws.reply({ id: ws.sent[0].id, error: { code: -32000, message: "No focused element" } });
+        await expect(p).rejects.toThrow("Input.insertText: No focused element");
+        expect(ws.listenerCount("message")).toBe(0);
+    });
+
+    it("times out, and detaches its listener so a late reply is harmless", async () => {
+        const ws = new FakeWs();
+        const p = sendCdpCommand(asWs(ws), "Page.captureScreenshot", {}, 20);
+        await expect(p).rejects.toThrow("Page.captureScreenshot timed out after 20ms");
+        expect(ws.listenerCount("message")).toBe(0);
+        ws.reply({ id: ws.sent[0].id, result: {} });
+    });
+
+    it("rejects when send throws (socket already closed)", async () => {
+        const ws = new FakeWs();
+        ws.send = () => { throw new Error("WebSocket is not open"); };
+        await expect(sendCdpCommand(asWs(ws), "Page.captureScreenshot")).rejects.toThrow("WebSocket is not open");
+        expect(ws.listenerCount("message")).toBe(0);
+    });
+});
+
+describe("evaluateJson", () => {
+    it("parses the JSON string the expression returns", async () => {
+        const ws = new FakeWs();
+        const p = evaluateJson<{ w: number }>(asWs(ws), "JSON.stringify({ w: 380 })");
+        expect(ws.sent[0].params).toEqual({ expression: "JSON.stringify({ w: 380 })", returnByValue: true });
+        ws.reply({ id: ws.sent[0].id, result: { result: { type: "string", value: "{\"w\":380}" } } });
+        await expect(p).resolves.toEqual({ w: 380 });
+    });
+
+    it("throws the page exception's description", async () => {
+        const ws = new FakeWs();
+        const p = evaluateJson(asWs(ws), "boom()");
+        ws.reply({ id: ws.sent[0].id, result: { result: { type: "object" }, exceptionDetails: { text: "Uncaught", exception: { description: "ReferenceError: boom is not defined" } } } });
+        await expect(p).rejects.toThrow("ReferenceError: boom is not defined");
+    });
+});
+
+describe("sendCdpCommand on a closing socket", () => {
+    it("rejects at once on a closed socket instead of waiting out its timeout", async () => {
+        const ws = Object.assign(new FakeWs(), { readyState: 3 });
+        await expect(sendCdpCommand(asWs(ws), "Page.captureScreenshot", {}, 60_000)).rejects.toThrow("socket is closed");
+        expect(ws.sent).toEqual([]);
+    });
+    it("rejects at once when the socket closes mid-wait, and detaches", async () => {
+        const ws = new FakeWs();
+        const p = sendCdpCommand(asWs(ws), "Page.captureScreenshot", {}, 60_000);
+        ws.emit("close");
+        await expect(p).rejects.toThrow("socket is closed");
+        expect(ws.listenerCount("message")).toBe(0);
+        expect(ws.listenerCount("close")).toBe(0);
+    });
+});
+
+describe("evaluateJson and a dialog", () => {
+    it("reports a dialog that opens during the read instead of timing out", async () => {
+        const ws = new FakeWs();
+        const p = evaluateJson(asWs(ws), "1", 60_000);
+        noteDialogOpened(ws, { type: "alert", message: "Saved", url: "http://x/" });
+        await expect(p).rejects.toThrow(/alert dialog: "Saved".*handle_dialog/s);
+        ws.emit("close"); // settle the losing evaluate so no timer outlives the test
+    });
+});

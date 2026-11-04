@@ -26,6 +26,9 @@ jest.unstable_mockModule("../../core/metro.js", () => ({
     fetchDevices,
     selectMainDevice,
     filterDebuggableDevices,
+    isChromiumTarget: () => false,
+    pickReconnectTarget: jest.fn(),
+    pinChromiumName: (d: any) => d.deviceName,
 }));
 
 const { executeInApp, markConnectionEstablished } = await import("../../core/jsExecute.js");

@@ -1,6 +1,7 @@
 import { executeInApp } from "./executor.js";
-import { getLogBuffer, getNetworkBuffer, getEpoch, bumpEpoch, connectedApps } from "./state.js";
+import { getLogBuffer, getNetworkBuffer, getEpoch, bumpEpoch, connectedApps, matchDeviceName } from "./state.js";
 import { mapConsoleType } from "./logs.js";
+import type { NetworkRequest } from "./types.js";
 
 export const ACTIVE_INTERVAL_MS = 3000;
 export const IDLE_INTERVAL_MS = 10000;
@@ -8,15 +9,65 @@ export const IDLE_INTERVAL_MS = 10000;
 const timers = new Map<string, NodeJS.Timeout>();
 // Per device: epoch-scoped SDK ids already mirrored, so repeated polls are no-ops.
 const mirrored = new Map<string, Set<string>>();
-// Per device: the JS runtime nonce seen on the last successful poll. A change
-// means the app process was replaced.
-const lastRunId = new Map<string, string>();
+// Per device: the JS runtime nonce seen on the last successful poll, and the
+// epoch it was seen in. A changed nonce means the runtime was replaced.
+const lastRunId = new Map<string, { runId: string; epoch: number }>();
 // Per device: polls in a row that never reached the app. The poller used to
 // reschedule forever no matter what came back, which in one production week
 // turned a single unattended install into 2093 of the 2233 `_auto_reconnect`
 // failures — polling a dead simulator every 3-10s from 19:23 to 07:55.
 const consecutiveFailures = new Map<string, number>();
 const MAX_CONSECUTIVE_FAILURES = 5;
+
+// Per device: server-clock periods when CDP was delivering console events.
+// The SDK patches console in-app, so every line logged while CDP is live
+// reaches the buffer twice: once as Runtime.consoleAPICalled, once through
+// this mirror. Verified live (iPhone Air, 2026-10-14): 5 console calls, 10
+// entries. Text matching cannot pair the copies (an object arg renders as
+// `{a: 1, nested: Object}` over CDP and as JSON in the SDK), so the mirror
+// skips SDK lines stamped inside a live period instead, and keeps lines from
+// before the connection and from reconnect gaps, which only the SDK has.
+//
+// A period counts only once a console event actually arrives on it, so a
+// socket whose console subscription is broken never hides the SDK's copy.
+interface CdpConsoleWindow {
+    start: number;
+    end?: number;
+    armed: boolean;
+}
+const cdpConsoleWindows = new Map<string, CdpConsoleWindow[]>();
+// ponytail: bounded history, enough for any realistic reconnect churn within one SDK buffer's lifetime.
+const MAX_CONSOLE_WINDOWS = 20;
+
+// Mocked interceptor rows that have already absorbed their SDK copy, so two
+// identical requests mocked back to back each keep one SDK twin, not both.
+const absorbedMockRows = new WeakSet<NetworkRequest>();
+/** How far apart, on the device clock, a mocked row and its SDK copy can start. */
+const MOCK_TWIN_WINDOW_MS = 2000;
+/** Bodies are compared on a prefix, below both sides' capture caps. */
+const MOCK_TWIN_BODY_PREFIX = 1000;
+
+/**
+ * The mocked interceptor row this SDK entry duplicates, if any.
+ *
+ * execbro-sdk and the interceptor both patch XMLHttpRequest, and the order
+ * depends on which landed first. SDK outermost: it records the app's request
+ * and then the mocked response the interceptor delivered. Interceptor
+ * outermost: a tamper's shadow request goes through the SDK's send. Either way
+ * one mocked call printed twice, once as [MOCK] and once untagged (iPhone
+ * Air, 2026-10-20). The ids never match, so pair on what the request is.
+ */
+function mockedTwin(mockRows: NetworkRequest[], entry: RawNetworkEntry): NetworkRequest | undefined {
+    const method = String(entry.method || "GET").toUpperCase();
+    const body = (entry.requestBody ?? "").slice(0, MOCK_TWIN_BODY_PREFIX);
+    return mockRows.find((row) =>
+        !absorbedMockRows.has(row) &&
+        row.method.toUpperCase() === method &&
+        row.url === entry.url &&
+        (row.postData ?? "").slice(0, MOCK_TWIN_BODY_PREFIX) === body &&
+        Math.abs(row.timestamp.getTime() - entry.timestamp) <= MOCK_TWIN_WINDOW_MS
+    );
+}
 
 interface RawNetworkEntry {
     id: string;
@@ -56,12 +107,8 @@ function pollingDisabled(): boolean {
  * substring resolution, so the original argument still routes correctly.
  */
 function bufferKeyFor(device: string): string {
-    const needle = device.toLowerCase();
-    for (const app of connectedApps.values()) {
-        const name = app.deviceInfo.deviceName || app.deviceInfo.title || "unknown";
-        if (name.toLowerCase().includes(needle)) return name;
-    }
-    return device;
+    const names = [...connectedApps.values()].map((app) => app.deviceInfo.deviceName || app.deviceInfo.title || "unknown");
+    return matchDeviceName(device, names) ?? device;
 }
 
 function seenSet(device: string): Set<string> {
@@ -73,6 +120,38 @@ function seenSet(device: string): Set<string> {
     return set;
 }
 
+/** A CDP socket for the device opened and subscribed to console events. */
+export function markCdpConsoleOpen(device: string, at: number = Date.now()): void {
+    const windows = cdpConsoleWindows.get(device) ?? [];
+    // A replaced socket's close may never be processed (it is superseded), so
+    // a new open ends whatever period is still running.
+    const last = windows[windows.length - 1];
+    if (last && last.end === undefined) last.end = at;
+    windows.push({ start: at, armed: false });
+    if (windows.length > MAX_CONSOLE_WINDOWS) windows.shift();
+    cdpConsoleWindows.set(device, windows);
+}
+
+/** A console event arrived over CDP: the current period is proven live. */
+export function markCdpConsoleSeen(device: string): void {
+    const windows = cdpConsoleWindows.get(device);
+    const last = windows?.[windows.length - 1];
+    if (last && last.end === undefined) last.armed = true;
+}
+
+/** The device's CDP socket closed. */
+export function markCdpConsoleClosed(device: string, at: number = Date.now()): void {
+    const windows = cdpConsoleWindows.get(device);
+    const last = windows?.[windows.length - 1];
+    if (last && last.end === undefined) last.end = at;
+}
+
+function capturedByCdp(device: string, serverTs: number): boolean {
+    const windows = cdpConsoleWindows.get(device);
+    if (!windows) return false;
+    return windows.some((w) => w.armed && serverTs >= w.start && (w.end === undefined || serverTs < w.end));
+}
+
 /** Test-only: drop all mirror bookkeeping and timers. */
 export function __resetMirrorState(): void {
     for (const timer of timers.values()) clearTimeout(timer);
@@ -80,6 +159,7 @@ export function __resetMirrorState(): void {
     mirrored.clear();
     lastRunId.clear();
     consecutiveFailures.clear();
+    cdpConsoleWindows.clear();
 }
 
 // Both SDK buffers in one round-trip, plus a per-runtime nonce. The accessor
@@ -96,9 +176,10 @@ export function __resetMirrorState(): void {
 const READ_EXPRESSION = `JSON.stringify((function(){
   var runId = globalThis.__EXECBRO_RUN_ID__ || (globalThis.__EXECBRO_RUN_ID__ = String(Math.random()).slice(2) + "-" + Date.now());
   var sdk = globalThis.__EXECBRO__ || globalThis.__RN_AI_DEVTOOLS__;
-  if (!sdk) return { runId: runId, network: [], console: [] };
+  if (!sdk) return { runId: runId, now: Date.now(), network: [], console: [] };
   return {
     runId: runId,
+    now: Date.now(),
     network: typeof sdk.getNetworkEntries === "function" ? sdk.getNetworkEntries() : [],
     console: typeof sdk.getConsoleEntries === "function" ? sdk.getConsoleEntries() : []
   };
@@ -124,6 +205,7 @@ const READ_EXPRESSION = `JSON.stringify((function(){
  */
 export async function mirrorOnce(device: string): Promise<{ logs: number; network: number; failed?: boolean }> {
     let raw;
+    const sentAt = Date.now();
     try {
         raw = await executeInApp(
             READ_EXPRESSION,
@@ -141,7 +223,9 @@ export async function mirrorOnce(device: string): Promise<{ logs: number; networ
     }
     if (!raw.success || !raw.result) return { logs: 0, network: 0, failed: true };
 
-    let parsed: { runId?: string; network?: RawNetworkEntry[]; console?: RawConsoleEntry[] };
+    const receivedAt = Date.now();
+
+    let parsed: { runId?: string; now?: number; network?: RawNetworkEntry[]; console?: RawConsoleEntry[] };
     try {
         parsed = JSON.parse(raw.result);
     } catch {
@@ -157,13 +241,19 @@ export async function mirrorOnce(device: string): Promise<{ logs: number; networ
     // A changed runtime nonce means the app process was replaced. Bump before
     // stamping so the new run's entries land in their own epoch and cannot
     // overwrite the previous run's (SDK ids restart their counter each run).
+    //
+    // Only when nothing else has bumped since the old nonce was seen: a
+    // reload_app also fires executionContextsCleared, which bumps first, and
+    // bumping again counted one restart as two. The SDK rows landed one epoch
+    // past the interceptor's rows from the same run, and every read drew two
+    // "app restarted" dividers inside one second (iPhone Air, 2026-10-20).
     if (parsed.runId) {
         const previous = lastRunId.get(deviceKey);
-        if (previous && previous !== parsed.runId) {
+        if (previous && previous.runId !== parsed.runId && previous.epoch === getEpoch(deviceKey)) {
             const next = bumpEpoch(deviceKey);
             console.error(`[execbro] App restart detected on ${deviceKey} — now epoch ${next}`);
         }
-        lastRunId.set(deviceKey, parsed.runId);
+        lastRunId.set(deviceKey, { runId: parsed.runId, epoch: getEpoch(deviceKey) });
     }
 
     const epoch = getEpoch(deviceKey);
@@ -171,9 +261,19 @@ export async function mirrorOnce(device: string): Promise<{ logs: number; networ
     let logs = 0;
     let network = 0;
 
+    const mockRows = getNetworkBuffer(deviceKey).getAll().filter((r) => r.mocked && r.capturedBy === "interceptor");
+
     for (const entry of parsed.network ?? []) {
         const key = `n:${epoch}:${entry.id}`;
         if (seen.has(key)) continue;
+        const twin = mockRows.length > 0 ? mockedTwin(mockRows, entry) : undefined;
+        if (twin) {
+            // Latched even while pending, or the next poll would pair it with
+            // nothing (its twin is taken) and add it after all.
+            absorbedMockRows.add(twin);
+            seen.add(key);
+            continue;
+        }
         // Latch only what is FINISHED. A network entry is not immutable: the
         // SDK adds it at request start with `completed:false` and fills in
         // status, headers and body later via `buffer.update()`. Latching on
@@ -211,10 +311,16 @@ export async function mirrorOnce(device: string): Promise<{ logs: number; networ
         network++;
     }
 
+    // SDK timestamps are on the device clock, CDP periods on ours. The
+    // round-trip midpoint maps one onto the other (a simulator shares the
+    // host clock, an emulator or phone may not).
+    const clockOffset = typeof parsed.now === "number" ? (sentAt + receivedAt) / 2 - parsed.now : 0;
+
     for (const entry of parsed.console ?? []) {
         const key = `c:${epoch}:${entry.id}`;
         if (seen.has(key)) continue;
         seen.add(key);
+        if (capturedByCdp(deviceKey, entry.timestamp + clockOffset)) continue;
         getLogBuffer(deviceKey).add({
             timestamp: new Date(entry.timestamp),
             level: mapConsoleType(entry.level),
@@ -239,6 +345,7 @@ export async function refreshMirror(device?: string): Promise<void> {
             return;
         }
         for (const app of connectedApps.values()) {
+            if (app.runtime === "native") continue; // no JS runtime to mirror
             await mirrorOnce(app.deviceInfo.deviceName || app.deviceInfo.title || "unknown");
         }
     } catch {

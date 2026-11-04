@@ -21,7 +21,7 @@ export interface AppRequestOptions {
  * Runs inside the app so it inherits the real network stack, TLS trust and
  * proxy configuration — and so the bearer token is resolved from live state
  * rather than pasted into the expression. The corpus shows 21 instances of this
- * pattern across two apps; Boardwise's 15 embed a full JWT literal, which puts
+ * pattern across two apps; AppB's 15 embed a full JWT literal, which puts
  * the credential in the transcript.
  *
  * Promise chain, not async/await: async function syntax is engine-dependent and

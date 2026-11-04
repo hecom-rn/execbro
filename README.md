@@ -64,9 +64,28 @@ Linking is only for the dashboard: it attaches your installs to your account so 
 - **Per-Device Buffers** - Logs and network requests are captured separately per device for clean debugging
 - **Cross-Platform Comparison** - Debug iOS and Android side-by-side, comparing logs, network traffic, and component trees
 
+### Electron & Chromium (experimental)
+
+- **Desktop React apps over CDP** - An Electron window or a Chrome tab connects as a `chromium` target alongside your simulators, and every tool takes the same `device` argument
+- **What works today** - Console logs, network capture, replay and mocking (`network_mock`, `network_condition`), `execute_in_app`, debug globals, Redux, `http_request` / `app_request`, React component inspection (`get_component_tree`, `find_components`, `inspect_component`), including on Vite apps whose DevTools hook has no renderers, plus `screenshot`, `tap`, `input_text`, `swipe` (mouse-wheel scroll, and a real drag with four coordinates) and `press_key` (Enter, Escape, Tab, arrows, shortcuts). JavaScript dialogs (`alert` / `confirm` / `prompt` / `beforeunload`) are reported by the tool that opened them instead of timing out, page tools refuse while one is open, and `handle_dialog` accepts or dismisses it. Taps find elements by `data-testid` / `id`, visible text or React component name and click with real CDP mouse events. Screen reading without a screenshot: `get_screen_state` (tap-ready elements, what an overlay blocks), `get_screen_layout`, `inspect_at_point` and `measure`
+- **Not yet** - `pinch`, `navigate` and the other mobile-only tools refuse a chromium target with a message saying so, rather than acting on the wrong device. Native HTML5 drag and drop (`draggable`) and hover are not handled yet
+- **Zero-config start** - `electron_launch_app({ projectPath: "path/to/app" })` starts an Electron project from its source folder with the debugging port open and connects its windows. It runs your project's own `electron` or `electron-vite`, never a packaged build
+- **Or opt in** - Add one dev-only line to the Electron main process, then run `scan_metro`. Port 9222 is listed but not auto-connected, because connecting injects a network interceptor into the page. Attach with `connect_metro({ port: 9222, device: "<window title>" })`, or set `EXECBRO_CHROMIUM_PORTS=9222` to auto-connect
+
+  ```ts
+  if (!app.isPackaged) app.commandLine.appendSwitch('remote-debugging-port', '9222')
+  ```
+
+  Keep the `!app.isPackaged` guard: an open debugging port on a packaged build lets anything that can reach it run code in your renderer
+
+### Native Android (preview)
+
+- **Kotlin apps without a JavaScript runtime** - A native app that includes `execbro-sdk-android` in its debug build registers named state and commands. `scan_metro` finds it over adb, `list_debug_globals` and `inspect_global` read its state, `run_app_command` runs its commands, `navigate` drives Jetpack Navigation, and `screenshot` captures the screen
+- **Coming soon** - The SDK is not published to Maven yet. Execbro already supports it; install instructions will follow with the SDK release
+
 ### Under the Hood
 
-- **Auto-Discovery** - Scans Metro on ports 8081, 8082, 19000-19002 automatically
+- **Auto-Discovery** - Scans Metro on ports 8081-8090 automatically, and lists Chromium/Electron targets on 9222 (plus any ports in `EXECBRO_CHROMIUM_PORTS`)
 - **Multi-Device Support** - Connects to all Bridgeless targets simultaneously, with per-device log and network buffers
 - **Auto-Reconnection** - Exponential backoff (up to 8 attempts) when connection drops
 - **Efficient Buffering** - Circular buffers: 500 logs, 200 network requests, 100 inspector selections
@@ -120,6 +139,7 @@ See the [full tool reference](docs/tools.md) for all tools with descriptions. Ke
 | `scan_metro`                            | **Start here** — scan for Metro servers and auto-connect                                 |
 | `get_logs` / `search_logs`              | Capture and search console logs with filtering and summaries                             |
 | `get_network_requests`                  | Monitor HTTP requests with method/status filtering                                       |
+| `get_timeline`                          | Actions, route changes, requests, logs and restarts in one time-ordered list              |
 | `get_screen_state`                      | **Orientation snapshot** — active route, overlays, and every element with a tap-ready `(x, y)` |
 | `get_screen_layout`                     | Screen map of visible components with positions, sizes, and text content                 |
 | `tap`                                   | **Unified tap** — auto-detects platform, tries fiber → accessibility → coordinates |
@@ -127,7 +147,7 @@ See the [full tool reference](docs/tools.md) for all tools with descriptions. Ke
 | `input_text`                            | Type text — targets and focuses a field itself, or `native:true` for whatever's focused. `replace:true` clears first (Fabric) |
 | `dismiss_keyboard`                      | Blur the focused input and close the on-screen keyboard                                  |
 | `execute_in_app`                        | Run JS expressions in the app runtime (REPL-style)                                       |
-| `ios_screenshot` / `android_screenshot` | Take device screenshots — `ios_screenshot` also works on a USB-attached physical iPhone/iPad (capture only) |
+| `screenshot`                            | Take a screenshot on any platform: iOS simulator, Android, Electron or Chrome, and a USB-attached physical iPhone/iPad (capture only) |
 
 ## Usage
 

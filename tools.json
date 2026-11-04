@@ -1,6 +1,6 @@
 {
     "generatedFrom": "toolRegistry",
-    "count": 64,
+    "count": 70,
     "tools": [
         "android_key_event",
         "android_launch_app",
@@ -13,6 +13,7 @@
         "connect_metro",
         "disconnect_metro",
         "dismiss_keyboard",
+        "electron_launch_app",
         "ensure_connection",
         "execute_in_app",
         "find_components",
@@ -29,7 +30,9 @@
         "get_request_details",
         "get_screen_layout",
         "get_screen_state",
+        "get_timeline",
         "get_usage_guide",
+        "handle_dialog",
         "harmony_key_event",
         "harmony_launch_app",
         "harmony_list_packages",
@@ -56,10 +59,13 @@
         "network_mock",
         "network_replay",
         "pinch",
+        "press_key",
         "redux_dispatch",
         "redux_get_state",
         "reload_app",
+        "run_app_command",
         "scan_metro",
+        "screenshot",
         "search_logs",
         "search_network",
         "send_feedback",
@@ -108,6 +114,7 @@
             "device"
         ],
         "connect_metro": [
+            "device",
             "port"
         ],
         "disconnect_metro": [
@@ -116,10 +123,16 @@
         "dismiss_keyboard": [
             "device"
         ],
+        "electron_launch_app": [
+            "port",
+            "projectPath",
+            "timeoutMs"
+        ],
         "ensure_connection": [
             "forceRefresh",
             "healthCheck",
-            "port"
+            "port",
+            "waitMs"
         ],
         "execute_in_app": [
             "awaitPromise",
@@ -230,8 +243,20 @@
             "includeHistory",
             "pressablesOnly"
         ],
+        "get_timeline": [
+            "device",
+            "limit",
+            "since",
+            "sources",
+            "until"
+        ],
         "get_usage_guide": [
             "topic"
+        ],
+        "handle_dialog": [
+            "action",
+            "device",
+            "promptText"
         ],
         "harmony_key_event": [
             "device",
@@ -268,6 +293,7 @@
             "index",
             "native",
             "replace",
+            "showKeyboard",
             "testID",
             "text",
             "textMatch"
@@ -350,6 +376,7 @@
             "device",
             "params",
             "routeTable",
+            "screen",
             "to"
         ],
         "network_condition": [
@@ -368,6 +395,7 @@
             "method",
             "mode",
             "networkError",
+            "operation",
             "remove",
             "set",
             "status",
@@ -397,6 +425,13 @@
             "x",
             "y"
         ],
+        "press_key": [
+            "device",
+            "key",
+            "repeat",
+            "testID",
+            "text"
+        ],
         "redux_dispatch": [
             "action",
             "device",
@@ -413,20 +448,31 @@
         "reload_app": [
             "device"
         ],
+        "run_app_command": [
+            "args",
+            "device",
+            "name"
+        ],
         "scan_metro": [
             "endPort",
             "startPort"
+        ],
+        "screenshot": [
+            "device",
+            "outputPath"
         ],
         "search_logs": [
             "device",
             "maxMessageLength",
             "maxResults",
+            "query",
             "text",
             "verbose"
         ],
         "search_network": [
             "device",
             "maxResults",
+            "query",
             "urlPattern"
         ],
         "send_feedback": [

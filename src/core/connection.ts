@@ -1,19 +1,23 @@
 import WebSocket from "ws";
 import type { FailureKind } from "./errors.js";
 import { DeviceInfo, RemoteObject, ExceptionDetails, ConnectedApp, NetworkRequest, ConnectOptions, ReconnectionConfig, EnsureConnectionResult, ExecutionResult, ConnectionCheckResult } from "./types.js";
+import { recordChromiumNavigation } from "./chromiumNavigation.js";
 import { connectedApps, isSupersededSocket, pendingExecutions, failPendingExecutionsForSocket, getNextMessageId, getEpoch, bumpEpoch, getLogBuffer, getNetworkBuffer, logBuffers, networkBuffers, setActiveSimulatorUdid, clearActiveSimulatorIfSource, updateLastCDPMessageTime, getLastCDPMessageTime, clearLastCDPMessageTime, clearAllCDPMessageTimes } from "./state.js";
 import { mapConsoleType, LogBuffer } from "./logs.js";
+import { injectCommitRecorder } from "./commitRecorder.js";
 import { injectNetworkInterceptor, sendNetworkEnable, isInterceptorEvent, applyInterceptedEvent, pushMockRules, isMockEvent, isMockedTrafficEvent } from "./networkInterceptor.js";
 import { serializeRules } from "./mockRules.js";
 import { findSimulatorByName } from "./ios.js";
 import { captureStack } from "./logStack.js";
 import { resolveAdbSerialForDeviceName } from "./android.js";
-import { fetchDevices, selectMainDevice, scanMetroPorts } from "./metro.js";
+import { fetchDevices, selectMainDevice, scanMetroPorts, isChromiumTarget, pickReconnectTarget, pinChromiumName } from "./metro.js";
 import { probeCdpAlive } from "./probe.js";
 import { UserInputError } from "./errors.js";
 import { scheduleAppDetection } from "./appDetection.js";
 import { markConnectionEstablished } from "./jsExecute.js";
-import { startSdkMirrorPoller, stopSdkMirrorPoller } from "./sdkMirrorPoller.js";
+import { startSdkMirrorPoller, stopSdkMirrorPoller, markCdpConsoleOpen, markCdpConsoleSeen, markCdpConsoleClosed } from "./sdkMirrorPoller.js";
+import { rememberHostAddresses, hostAddressChangeHint } from "./hostAddress.js";
+import { noteDialogOpened, noteDialogClosed, openDialog, dialogGate, formatDialog, DIALOG_BLOCKED_TOOLS } from "./chromiumDialogs.js";
 import {
     DEFAULT_RECONNECTION_CONFIG,
     MIN_STABLE_CONNECTION_MS,
@@ -24,6 +28,7 @@ import {
     closeConnectionGap,
     saveConnectionMetadata,
     clearConnectionMetadata,
+    clearConnectionState,
     getConnectionMetadata,
     saveReconnectionTimer,
     cancelReconnectionTimer,
@@ -211,6 +216,19 @@ export function clearReconnectionSuppression(): void {
     reconnectionSuppressed.clear();
 }
 
+// Metro's inspector proxy (@react-native/dev-middleware) allows one debugger per
+// app and closes the current one with this reason when another attaches: React
+// Native DevTools, a second execbro server, another agent session. Reconnecting
+// from the close handler evicts that debugger, whose own auto-reconnect evicts
+// us back, and the two flap until one runs out of attempts. So a displaced
+// connection is left closed and only a tool call takes the app back.
+const NEW_DEBUGGER_OPENED = "[NEW_DEBUGGER_OPENED]";
+const displacedApps: Set<string> = new Set();
+
+export function isDisplacedClose(reason: unknown): boolean {
+    return String(reason ?? "").includes(NEW_DEBUGGER_OPENED);
+}
+
 const STALE_ACTIVITY_THRESHOLD_MS = 30_000;
 // WebSocket ping/pong keepalive interval. Was 1s with a single missed tick
 // allowed, which terminated healthy sockets ~2s after connect while their own
@@ -376,6 +394,34 @@ export function purgeStaleConnectionsForPorts(
     }
 
     return purged;
+}
+
+/**
+ * Order one device's app runtimes for connecting: a connected app that still
+ * answers keeps the device; a connected one that does not is dropped so another
+ * app on the device can take it. Verified live: with a second app launched on a
+ * simulator, scan_metro kept the backgrounded one ("Already connected") and every
+ * read timed out against its suspended JS.
+ */
+export async function orderAppsOnDevice(port: number, candidates: DeviceInfo[]): Promise<DeviceInfo[]> {
+    if (candidates.length < 2) return candidates;
+    for (const d of candidates) {
+        const key = `${port}-${d.id}`;
+        const app = connectedApps.get(key);
+        if (!app || app.ws.readyState !== WebSocket.OPEN) continue;
+        const rest = candidates.filter((c) => c !== d);
+        if (await probeCdpAlive(app.ws, PROBE_TIMEOUT_MS)) return [d, ...rest];
+        console.error(`[execbro] ${d.title} does not answer and another app shares its device; releasing it`);
+        reconnectionSuppressed.add(key);
+        cancelReconnectionTimer(key);
+        clearLastCDPMessageTime(key);
+        clearActiveSimulatorIfSource(key);
+        try { app.ws.close(); } catch { /* ignore */ }
+        connectedApps.delete(key);
+        // Last, so it is retried if it was only busy and nothing else answers.
+        return [...rest, d];
+    }
+    return candidates;
 }
 
 // Format CDP RemoteObject to readable string
@@ -774,6 +820,16 @@ export function handleCDPMessage(message: Record<string, unknown>, device: Devic
                     // (or resumes) producing console.debug lines and CDP
                     // traffic.
                     sendNetSuppressionFlag(app.ws, nextPresent);
+                    // Until this edge the server captured on its own, and the SDK
+                    // recorded the same startup requests in-app from init(); the
+                    // mirror then copies those in, so every one was listed twice
+                    // after reload_app (whose fresh connection starts with
+                    // sdkPresent unknown). The SDK's copy is the complete one.
+                    if (nextPresent) {
+                        const name = app.deviceInfo.deviceName || app.deviceInfo.title || "unknown";
+                        const epoch = getEpoch(name);
+                        getNetworkBuffer(name).removeWhere((r) => r.epoch === epoch && r.capturedBy !== undefined && !r.mocked);
+                    }
                 }
             }
             return;
@@ -801,8 +857,30 @@ export function handleCDPMessage(message: Record<string, unknown>, device: Devic
 
     const method = message.method as string;
 
+    // Route changes on chromium (Page.enable is only sent there). A child
+    // frame's change is not the page moving; the main frame's id is the target id.
+    if (method === "Page.frameNavigated" || method === "Page.navigatedWithinDocument") {
+        const p = message.params as { frame?: { url?: string; parentId?: string }; url?: string; frameId?: string };
+        const url = method === "Page.frameNavigated" ? (p.frame?.parentId ? undefined : p.frame?.url) : (p.frameId === device.id ? p.url : undefined);
+        if (url) recordChromiumNavigation(deviceName, url, getEpoch(deviceName), Date.now());
+        return;
+    }
+
+    // JavaScript dialogs on chromium. The page is paused while one is open; the
+    // tracker lets the gate and the input races report it instead of timing out.
+    if (method === "Page.javascriptDialogOpening" || method === "Page.javascriptDialogClosed") {
+        const dws = ws ?? connectedApps.get(findAppKeyForDevice(device) ?? "")?.ws;
+        if (dws) {
+            const p = message.params as { type: string; message: string; defaultPrompt?: string; url: string; result: boolean; userInput?: string };
+            if (method === "Page.javascriptDialogOpening") noteDialogOpened(dws, p);
+            else noteDialogClosed(dws, p);
+        }
+        return;
+    }
+
     // Handle Runtime.consoleAPICalled
     if (method === "Runtime.consoleAPICalled") {
+        markCdpConsoleSeen(deviceName);
         const params = message.params as {
             type?: string;
             args?: Array<CDPConsoleArg>;
@@ -832,14 +910,13 @@ export function handleCDPMessage(message: Record<string, unknown>, device: Devic
             // installed, which reads as "the rule never matched" — the exact
             // opposite of what had happened.
             const suppressed = iApp?.cdpNetworkSupported || iApp?.sdkPresent;
-            // Mocked traffic is exempt from the CDP half of the gate: the
-            // request never reaches the network, so CDP cannot report it and
-            // ours is the only record. Without this a mocked request vanishes
-            // from get_network_requests on every CDP-capture target — the one
-            // thing a mock must never do.
-            const mockedUnderCdp =
-                iApp?.cdpNetworkSupported && !iApp?.sdkPresent && isMockedTrafficEvent(interceptorJson);
-            if (!suppressed || isMockEvent(interceptorJson) || mockedUnderCdp) {
+            // Mocked traffic is exempt from both halves: the request never
+            // reaches the network, so CDP cannot report it, and execbro-sdk
+            // patches XMLHttpRequest at the same layer as the interceptor, whose
+            // mock returns before the SDK's send runs. Ours is the only record;
+            // without it a mocked request was invisible on every SDK app
+            // (verified live, RN 0.85 test app: hits=3, zero rows).
+            if (!suppressed || isMockEvent(interceptorJson) || isMockedTrafficEvent(interceptorJson)) {
                 applyInterceptedEvent(interceptorJson, getNetworkBuffer(deviceName), deviceName);
             }
             return;
@@ -949,7 +1026,8 @@ export function handleCDPMessage(message: Record<string, unknown>, device: Devic
                 requestTime: params.timestamp
             },
             completed: false,
-            epoch: getEpoch(deviceName)
+            epoch: getEpoch(deviceName),
+            capturedBy: "cdp"
         };
 
         getNetworkBuffer(deviceName).set(params.requestId, request);
@@ -1034,7 +1112,8 @@ export function handleCDPMessage(message: Record<string, unknown>, device: Devic
             // Re-inject network interceptor and re-check CDP Network support
             const ctxApp = connectedApps.get(appKey);
             if (ctxApp?.ws?.readyState === WebSocket.OPEN) {
-                injectNetworkInterceptor(ctxApp.ws);
+                if (ctxApp.platform !== "chromium") injectCommitRecorder(ctxApp.ws);
+                injectNetworkInterceptor(ctxApp.ws, ctxApp.platform === "chromium");
                 // The fresh context starts with __RN_NET_DISABLED__ undefined,
                 // so the just-injected interceptor would emit alongside the SDK
                 // until something flips it back. The probe's edge detector
@@ -1110,7 +1189,7 @@ export async function connectToDevice(
                 });
 
                 if (isAlive) {
-                    resolve(`Already connected to ${device.title}`);
+                    resolve(`Already connected to ${device.deviceName || device.title}`);
                     return;
                 }
 
@@ -1171,7 +1250,7 @@ export async function connectToDevice(
             let pingInterval: NodeJS.Timeout | null = null;
             let staleRejected = false;
 
-            const handleClose = () => {
+            const handleClose = (code?: number, reason?: Buffer) => {
                 if (staleRejected) return; // probe-fail path handles its own cleanup
                 if (pingInterval) {
                     clearInterval(pingInterval);
@@ -1203,6 +1282,7 @@ export async function connectToDevice(
                 // Stop mirroring — the socket is gone, so every tick would just
                 // fail. No drain attempt here: there is nothing left to read.
                 stopSdkMirrorPoller(device.deviceName || device.title || "unknown");
+                markCdpConsoleClosed(device.deviceName || device.title || "unknown");
 
                 connectedApps.delete(appKey);
                 clearLastCDPMessageTime(appKey);
@@ -1237,10 +1317,16 @@ export async function connectToDevice(
                 const uptimeMs = state?.lastConnectedTime ? Date.now() - state.lastConnectedTime.getTime() : 0;
                 const earlyPhase = state ? "" : " (before state init)";
                 console.error(`[execbro] Disconnected from ${device.title}${earlyPhase}`);
-                recordConnectionEvent("closed", appKey, device.title, `uptime ${formatDuration(uptimeMs)}${wasStable ? " (stable)" : " (unstable)"}${earlyPhase}`);
+                const closeReason = String(reason ?? "");
+                recordConnectionEvent("closed", appKey, device.title, `uptime ${formatDuration(uptimeMs)}${wasStable ? " (stable)" : " (unstable)"}${earlyPhase}, code ${code ?? "?"}${closeReason ? ` ${closeReason}` : ""}`);
 
-                // Schedule auto-reconnection if enabled (skip if intentionally disconnected)
-                if (reconnectionConfig.enabled && !reconnectionSuppressed.has(appKey)) {
+                // Schedule auto-reconnection if enabled (skip if intentionally
+                // disconnected, or if another debugger took the app over)
+                if (isDisplacedClose(reason) && !reconnectionSuppressed.has(appKey)) {
+                    displacedApps.add(appKey);
+                    console.error(`[execbro] Another debugger took over ${device.title}; not reconnecting`);
+                    recordConnectionEvent("displaced", appKey, device.title, "another debugger opened this app (Metro allows one); not reconnecting, ensure_connection takes it back");
+                } else if (reconnectionConfig.enabled && !reconnectionSuppressed.has(appKey)) {
                     // If close fired before initConnectionState, scheduleReconnection
                     // would early-return (it requires existing state). Init it now
                     // so the reconnect loop can still run.
@@ -1283,13 +1369,15 @@ export async function connectToDevice(
                 } else {
                     clearConnectionMetadata(appKey);
                 }
-                resolve(`Skipped ${device.deviceName || device.title} (stale CDP target — no response from JS context)`);
+                resolve(staleTargetMessage(device));
                 return;
             }
 
             // Connection established — run setup
             connectionLocks.delete(appKey);
-            connectedApps.set(appKey, { ws, deviceInfo: device, port, platform: "android" });
+            // The name buffers and the registry now use; a no-op for RN.
+            device.deviceName = pinChromiumName(device);
+            connectedApps.set(appKey, { ws, deviceInfo: device, port, platform: isChromiumTarget(device) ? "chromium" : "android" });
             recordDeviceSeen(device.deviceName || device.title);
             markConnectionEstablished();
 
@@ -1306,7 +1394,12 @@ export async function connectToDevice(
             // Mirror the in-app SDK buffers into ours so a hard app restart
             // does not take the only copy with it. No-op when the SDK is absent
             // or EXECBRO_DISABLE_SDK_MIRROR=1.
+            // Runtime.enable below starts CDP console capture; the mirror then
+            // skips SDK lines that CDP already delivered.
+            markCdpConsoleOpen(bufferKey);
             startSdkMirrorPoller(device.deviceName);
+
+            displacedApps.delete(appKey);
 
             // Initialize or update connection state
             // Note: We do NOT reset reconnectionAttempts here - that happens
@@ -1322,11 +1415,13 @@ export async function connectToDevice(
                 initContextHealth(appKey);
                 console.error(`[execbro] Reconnected to ${device.title}`);
                 recordConnectionEvent("reconnect-success", appKey, device.title);
+                rememberHostAddresses();
             } else {
                 initConnectionState(appKey);
                 initContextHealth(appKey);
                 console.error(`[execbro] Connected to ${device.title}`);
                 recordConnectionEvent("connect-success", appKey, device.title);
+                rememberHostAddresses();
             }
 
             // Enable Runtime domain to receive console messages
@@ -1345,8 +1440,17 @@ export async function connectToDevice(
                 })
             );
 
+            // Page domain events report JavaScript dialogs (alert / confirm / prompt).
+            // Chromium only: Metro's inspector proxy has no use for it.
+            if (isChromiumTarget(device)) {
+                ws.send(JSON.stringify({ id: getNextMessageId(), method: "Page.enable" }));
+            }
+
+            // React commits, for render and startup timing. Before the
+            // interceptor so a fresh context gets the earliest possible install.
+            if (!isChromiumTarget(device)) injectCommitRecorder(ws);
             // Inject JS network interceptor (immediate capture, may fail if context not ready)
-            injectNetworkInterceptor(ws);
+            injectNetworkInterceptor(ws, isChromiumTarget(device));
             // Rules for this device may already exist — from a previous session
             // of the same server process, or a reconnect after the app was
             // killed. Runtime.executionContextCreated is not guaranteed to
@@ -1372,7 +1476,7 @@ export async function connectToDevice(
             //   - Android: adb serial via resolveAdbSerialForDeviceName (AVD name, else model)
             // Both are best-effort; failures are swallowed. Identifiers enable
             // automatic device scoping and power the registry-first resolver fast path.
-            if (device.deviceName) {
+            if (device.deviceName && !isChromiumTarget(device)) {
                 const [simulatorUdid, adbSerial] = await Promise.all([
                     findSimulatorByName(device.deviceName).catch(() => null),
                     resolveAdbSerialForDeviceName(device.deviceName).catch(() => null)
@@ -1390,6 +1494,12 @@ export async function connectToDevice(
                         connectedApp.platform = "android";
                         connectedApp.adbSerial = adbSerial;
                         console.error(`[execbro] Linked to Android emulator: ${adbSerial}`);
+                    }
+                    // Neither simctl nor adb knows it: a USB iPhone. Left at the
+                    // "android" default it was refused by every iOS tool.
+                    // ponytail: name heuristic, a renamed phone ("Igor's phone") still reads android.
+                    if (!simulatorUdid && !adbSerial && /\b(iphone|ipad|ipod)\b/i.test(device.deviceName)) {
+                        connectedApp.platform = "ios";
                     }
                 }
             }
@@ -1442,7 +1552,11 @@ export async function connectToDevice(
                 }
             });
 
-            resolve(`Connected to ${device.title} (${device.deviceName})`);
+            resolve(isChromiumTarget(device)
+                // Other CDP clients on this page (chrome-devtools-mcp, a human's DevTools)
+                // will now see a patched fetch/XHR with nothing in their own output to say why.
+                ? `Connected to ${device.deviceName} (chromium, ${device.url ?? "no url"}). Note: execbro injected an XHR/fetch interceptor into this page; other CDP clients inspecting it will observe the patched network layer.`
+                : `Connected to ${device.title} (${device.deviceName})`);
         } catch (error) {
             // Connection failed (both with and without Origin header)
             connectionLocks.delete(appKey);
@@ -1478,7 +1592,8 @@ function scheduleReconnection(
     if (attempts >= config.maxAttempts) {
         console.error(`[execbro] Max reconnection attempts (${config.maxAttempts}) reached for ${appKey}`);
         updateConnectionState(appKey, { status: "disconnected" });
-        recordConnectionEvent("max-attempts-reached", appKey, deviceTitle, `${config.maxAttempts} attempts exhausted`);
+        const addressHint = hostAddressChangeHint(meta?.port);
+        recordConnectionEvent("max-attempts-reached", appKey, deviceTitle, `${config.maxAttempts} attempts exhausted${addressHint ? `\n${addressHint}` : ""}`);
         return;
     }
 
@@ -1529,9 +1644,18 @@ async function attemptReconnection(
         const devices = await fetchDevices(metadata.port);
 
         // Try to find the same device first, otherwise select main device
-        const device = devices.find(d => d.id === metadata.deviceInfo.id)
-            || selectMainDevice(devices);
+        const device = pickReconnectTarget(devices, metadata.deviceInfo);
 
+        if (!device && isChromiumTarget(metadata.deviceInfo) && chromiumWindowGone(devices.length, getConnectionState(appKey)?.reconnectionAttempts ?? 0)) {
+            // A chromium target id never comes back once its window closes (a reopen
+            // gets a new id, and scan_metro connects it). Retrying only kept an open
+            // gap that made every device's log and network reads warn "disconnected".
+            console.error(`[execbro] Window closed: ${appKey}`);
+            recordConnectionEvent("window-closed", appKey, deviceTitle, "target no longer listed");
+            clearConnectionState(appKey);
+            clearConnectionMetadata(appKey);
+            return false;
+        }
         if (!device) {
             console.error(`[execbro] Device no longer available for ${appKey}`);
             recordConnectionEvent("reconnect-failed", appKey, deviceTitle, "device no longer advertised by Metro");
@@ -1567,16 +1691,26 @@ export function getConnectedApps(): Array<{
 
 // Get first connected app with an OPEN WebSocket (or null if none)
 export function getFirstConnectedApp(): ConnectedApp | null {
-    // Find first app with OPEN WebSocket, cleaning up stale entries
+    // Find first app with OPEN WebSocket, cleaning up stale entries. A React
+    // Native app wins, then chromium, then a native (SDK) app: map order shifts
+    // on every reconnect, and a bare call in a mixed session means the RN app.
+    let chromium: ConnectedApp | null = null;
+    let native: ConnectedApp | null = null;
     for (const [key, app] of connectedApps.entries()) {
         if (app.ws.readyState === WebSocket.OPEN) {
-            return app;
+            if (app.runtime === "native") {
+                native ??= app;
+                continue;
+            }
+            if (app.platform !== "chromium") return app;
+            chromium ??= app;
+            continue;
         }
         // Clean up stale entry
         console.error(`[execbro] Cleaning up stale connection in getFirstConnectedApp: ${key} (state: ${getWebSocketStateName(app.ws.readyState)})`);
         connectedApps.delete(key);
     }
-    return null;
+    return chromium ?? native;
 }
 
 /**
@@ -1619,7 +1753,8 @@ export function getConnectedAppByAndroidDeviceId(deviceId?: string): ConnectedAp
             connectedApps.delete(key);
             continue;
         }
-        if (app.platform === "android") androidApps.push(app);
+        // Callers read the React screen state over CDP, which a native SDK app does not speak.
+        if (app.platform === "android" && app.runtime !== "native") androidApps.push(app);
     }
 
     if (androidApps.length === 0) return null;
@@ -1797,10 +1932,21 @@ export function resolveConnectedAppByDevice(device?: string): DeviceResolution {
         const haystacks = [
             normalizeDeviceId(deviceLabel(app)),
             normalizeDeviceId(app.simulatorUdid),
-            normalizeDeviceId(app.adbSerial)
+            normalizeDeviceId(app.adbSerial),
+            normalizeDeviceId(app.nativePackage)
         ].filter((s) => s.length > 0);
         if (haystacks.some((h) => h.includes(normDevice))) {
             matches.push(app);
+        }
+    }
+    // Only when no name matched: a chromium window's page url, so
+    // `device: "window=main"` addresses it whatever it is named, including after a
+    // server restart renames it. A fallback, so a url that happens to contain
+    // "iphone" can never turn a working mobile name ambiguous.
+    if (matches.length === 0) {
+        for (const app of openApps) {
+            const url = normalizeDeviceId(app.deviceInfo.url);
+            if (url && url.includes(normDevice)) matches.push(app);
         }
     }
 
@@ -1812,6 +1958,81 @@ export function resolveConnectedAppByDevice(device?: string): DeviceResolution {
     if (matches.length === 1) return { kind: "ok", app: matches[0] };
     if (matches.length > 1) return { kind: "ambiguous", device, matches };
     return { kind: "none", device, connected: openApps };
+}
+
+/**
+ * Which platform a tool call will act on, read from the registry alone. Runs on
+ * every tool call, so it must never touch a device. Returns undefined whenever
+ * the answer is not certain, and the gate then fails open: blocking a mobile call
+ * on a wrong guess is far worse than letting a chromium call reach a clearer
+ * downstream failure.
+ */
+export function peekTargetPlatform(toolName: string, device: unknown): ConnectedApp["platform"] | undefined {
+    return peekTargetApp(toolName, device)?.platform;
+}
+
+/**
+ * The connected app a tool call targets, read from the in-memory registry with
+ * no I/O, or undefined when that cannot be decided (the gates fail open on it).
+ */
+export function peekTargetApp(toolName: string, device: unknown): ConnectedApp | undefined {
+    if (typeof device === "string" && device.length > 0) {
+        const resolved = resolveConnectedAppByDevice(device);
+        return resolved.kind === "ok" ? resolved.app : undefined;
+    }
+    // A bare ios_/android_ call targets the OS device, not a connected app.
+    if (toolName.startsWith("ios_") || toolName.startsWith("android_")) return undefined;
+    // The same app the handler's own default resolves to, so the two cannot disagree.
+    return getFirstConnectedApp() ?? undefined;
+}
+
+/** The native (execbro-sdk-android) app a tool call targets, or null when it targets anything else. */
+export function nativeAppFor(toolName: string, device?: string): ConnectedApp | null {
+    const app = peekTargetApp(toolName, device);
+    return app?.runtime === "native" ? app : null;
+}
+
+/**
+ * The chromium app a tool call targets, or null when it targets anything else.
+ * Asks peekTargetPlatform, the same question the capability gate asks, so a
+ * handler's chromium branch and the gate cannot disagree about the target.
+ */
+export function chromiumAppFor(toolName: string, device?: string): ConnectedApp | null {
+    if (peekTargetPlatform(toolName, device) !== "chromium") return null;
+    return device ? getConnectedAppByDevice(device) : getFirstConnectedApp();
+}
+
+/**
+ * Whether a chromium target missing from its port's listing is a closed window.
+ * fetchDevices returns [] on any fetch error, so an empty listing alone could be
+ * a /json hiccup on a window that is still there: that needs a second miss.
+ */
+export function chromiumWindowGone(listed: number, attempts: number): boolean {
+    return listed > 0 || attempts >= 2;
+}
+
+/**
+ * The line a rejected target gets. On chromium the usual cause is a JavaScript
+ * dialog left open: the page is paused, Page.enable does not replay the dialog,
+ * and a new session can neither see nor answer it. Restarting Metro is no fix there.
+ */
+export function staleTargetMessage(device: DeviceInfo): string {
+    const name = device.deviceName || device.title;
+    return isChromiumTarget(device)
+        ? `Skipped ${name} (stale CDP target — the page does not answer. A JavaScript dialog (alert / confirm / prompt) may be open in the window: close it with the window's own buttons, then scan again)`
+        : `Skipped ${name} (stale CDP target — no response from JS context)`;
+}
+
+/** The dialog refusal for a call aimed at a chromium page with a dialog open, else null. Never throws. */
+export function dialogGateFor(toolName: string, device: unknown) {
+    // Checked first: resolving the device costs a registry walk on every tool call.
+    if (!DIALOG_BLOCKED_TOOLS.has(toolName)) return null;
+    try {
+        const app = chromiumAppFor(toolName, typeof device === "string" ? device : undefined);
+        return app ? dialogGate(toolName, openDialog(app.ws)) : null;
+    } catch {
+        return null; // a bad device argument is the handler's to report
+    }
 }
 
 export function getConnectedAppByDevice(device?: string): ConnectedApp | null {
@@ -1951,6 +2172,7 @@ export async function verifyLogPipeline(app: ConnectedApp): Promise<LogPipelineR
     try {
         app.ws.send(JSON.stringify({ id: getNextMessageId(), method: "Runtime.enable" }));
         app.ws.send(JSON.stringify({ id: getNextMessageId(), method: "Log.enable" }));
+        if (app.platform === "chromium") app.ws.send(JSON.stringify({ id: getNextMessageId(), method: "Page.enable" }));
     } catch {
         // WS send failed — fall through to reconnect
     }
@@ -2020,6 +2242,33 @@ export function isHealthCheckMarker(message: string): boolean {
 /**
  * Find the first available Metro port
  */
+/**
+ * What a port with no debuggable target actually means. "No debuggable devices found"
+ * read as "Metro is down" to agents, who then gave up on a cold launch whose bundle was
+ * seconds from attaching: Metro answers /status long before any app has a runtime to list.
+ */
+export async function noAppAttachedMessage(port: number, waitedMs = 0): Promise<string> {
+    const addressHint = hostAddressChangeHint(port);
+    if (addressHint) return addressHint;
+    let status = "";
+    try {
+        status = await (await fetch(`http://localhost:${port}/status`, { signal: AbortSignal.timeout(1500) })).text();
+    } catch {
+        // not an HTTP server, or not answering: reported below as not Metro
+    }
+    if (!status.includes("packager-status:running")) {
+        return `Port ${port}: open, but not answering as Metro (no packager-status) and lists no debuggable targets.`;
+    }
+    if (waitedMs > 0) {
+        return `Port ${port}: Metro is running, but no app attached in ${Math.round(waitedMs / 1000)}s. ` +
+            `Next: screenshot (a red box, or a splash that never finishes), get_bundle_errors, and check the app is running ` +
+            `(ios_launch_app / android_launch_app) and loads from this machine's Metro.`;
+    }
+    return `Port ${port}: Metro is running, but no app has attached yet. Metro is NOT down. ` +
+        `Right after a launch this is normal: the app is still downloading and running its bundle, and a cold first bundle can take a minute or more. ` +
+        `Next: ensure_connection({ waitMs: 60000 }) returns as soon as the app attaches.`;
+}
+
 async function findFirstMetroPort(): Promise<number | null> {
     const ports = await scanMetroPorts();
     return ports.length > 0 ? ports[0] : null;
@@ -2033,8 +2282,9 @@ export async function ensureConnection(options: {
     port?: number;
     healthCheck?: boolean;
     forceRefresh?: boolean;
+    waitMs?: number;
 } = {}): Promise<EnsureConnectionResult> {
-    const { port, healthCheck = true, forceRefresh = false } = options;
+    const { port, healthCheck = true, forceRefresh = false, waitMs = 0 } = options;
 
     let wasReconnected = false;
 
@@ -2049,9 +2299,11 @@ export async function ensureConnection(options: {
         }
     }
 
-    let openApps: ConnectedApp[] = getConnectedApps()
-        .filter(a => a.isConnected)
-        .map(a => a.app);
+    // Native (execbro-sdk-android) apps speak no CDP: a CDP health check always
+    // fails on them and would close a healthy socket. Their connection is
+    // managed by nativeDiscovery, so this function only looks at CDP apps.
+    const cdpApps = () => getConnectedApps().filter(a => a.isConnected && a.app.runtime !== "native").map(a => a.app);
+    let openApps: ConnectedApp[] = cdpApps();
 
     // Nothing connected — establish a single-device connection from scratch.
     if (openApps.length === 0) {
@@ -2067,15 +2319,20 @@ export async function ensureConnection(options: {
             };
         }
 
-        const devices = await fetchDevices(targetPort);
-        const mainDevice = selectMainDevice(devices);
+        // A cold launch lists nothing until its bundle has loaded; waitMs polls for it.
+        const deadline = Date.now() + waitMs;
+        let mainDevice = selectMainDevice(await fetchDevices(targetPort));
+        while (!mainDevice && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            mainDevice = selectMainDevice(await fetchDevices(targetPort));
+        }
         if (!mainDevice) {
             return {
                 connected: false,
                 wasReconnected: false,
                 healthCheckPassed: false,
                 connectionInfos: [],
-                error: `No debuggable devices found on port ${targetPort}. Make sure the app is running.`,
+                error: await noAppAttachedMessage(targetPort, waitMs),
                 failureKind: "no_debuggable_devices",
             };
         }
@@ -2096,14 +2353,14 @@ export async function ensureConnection(options: {
                     wasReconnected: false,
                     healthCheckPassed: false,
                     connectionInfos: [],
-                    error: `${connectResult}. The CDP page advertised by Metro is no longer responsive — restart the React Native app, then retry.`,
+                    error: isChromiumTarget(mainDevice) ? connectResult : `${connectResult}. The CDP page advertised by Metro is no longer responsive — restart the React Native app, then retry.`,
                 };
             }
 
             // Race window: settle briefly and retry getting the open app list.
             for (let i = 0; i < 5 && openApps.length === 0; i++) {
                 if (i > 0) await new Promise(resolve => setTimeout(resolve, 100));
-                openApps = getConnectedApps().filter(a => a.isConnected).map(a => a.app);
+                openApps = cdpApps();
             }
         } catch (error) {
             let errorMessage: string;
@@ -2136,11 +2393,20 @@ export async function ensureConnection(options: {
 
     // Per-device health-check; reconnect failed devices individually so a dead
     // Android doesn't take down a healthy iOS report and vice versa.
-    const perApp: Array<{ app: ConnectedApp; healthy: boolean }> = [];
+    const perApp: Array<{ app: ConnectedApp; healthy: boolean; dialog?: string }> = [];
 
     for (const candidate of openApps) {
         let app = candidate;
         let healthy = true;
+
+        // A page paused by a JavaScript dialog fails the evaluate but is not
+        // stale. Reconnecting would lose the dialog for good: Page.enable does not
+        // replay it, and a new session can neither see nor answer it.
+        const dialog = app.platform === "chromium" ? openDialog(app.ws) : null;
+        if (dialog) {
+            perApp.push({ app, healthy: false, dialog: formatDialog(dialog) });
+            continue;
+        }
 
         if (healthCheck) {
             healthy = await runQuickHealthCheck(app);
@@ -2156,7 +2422,7 @@ export async function ensureConnection(options: {
                 connectedApps.delete(appKey);
 
                 const devices = await fetchDevices(appPort);
-                const mainDevice = selectMainDevice(devices);
+                const mainDevice = pickReconnectTarget(devices, app.deviceInfo);
                 if (mainDevice) {
                     try {
                         await connectToDevice(mainDevice, appPort);
@@ -2183,7 +2449,7 @@ export async function ensureConnection(options: {
         perApp.push({ app, healthy });
     }
 
-    const connectionInfos = perApp.map(({ app, healthy }) => {
+    const connectionInfos = perApp.map(({ app, healthy, dialog }) => {
         const appKey = `${app.port}-${app.deviceInfo.id}`;
         const connectionState = getConnectionState(appKey);
         const contextHealth = getContextHealth(appKey);
@@ -2199,6 +2465,7 @@ export async function ensureConnection(options: {
             uptime,
             contextId: contextHealth?.contextId ?? null,
             healthCheckPassed: healthy,
+            ...(dialog && { dialog }),
         };
     });
 
@@ -2290,6 +2557,10 @@ export function passiveConnectionBanner(targetAppKey?: string): string {
     const passive = getPassiveConnectionStatus(targetAppKey);
     if (passive.connected) return "";
     if (passive.reason === "no_connection") {
+        const displaced = targetAppKey ? displacedApps.has(targetAppKey) : displacedApps.size > 0;
+        if (displaced) {
+            return "\n\n[CONNECTION] Another debugger took this app over (Metro allows one per app: React Native DevTools, another execbro server or session). Showing cached data. New data is not being captured. Call ensure_connection to take it back, which disconnects the other debugger.";
+        }
         return "\n\n[CONNECTION] Disconnected. Showing cached data. New data is not being captured.";
     }
     return `\n\n[CONNECTION] Status unknown for this read (${passive.reason}) — inferred, not measured. The data above is real; if you suspect capture stopped, call ensure_connection({healthCheck:true}) rather than scan_metro.`;
@@ -2327,6 +2598,7 @@ export async function checkAndEnsureConnection(device?: string): Promise<Connect
         }
     }
 
+    const wasDisplaced = displacedApps.size > 0;
     const result = await ensureConnection({ forceRefresh: true, healthCheck: true });
 
     if (result.connected && result.healthCheckPassed) {
@@ -2334,7 +2606,9 @@ export async function checkAndEnsureConnection(device?: string): Promise<Connect
         return {
             connected: true,
             wasReconnected: true,
-            message: "[CONNECTION] Was stale, re-established. Earlier data may be incomplete; new data will appear on next call.",
+            message: wasDisplaced
+                ? "[CONNECTION] Another debugger had taken this app over (Metro allows one per app). Took it back, which disconnected that debugger. Data from the time in between was not captured; new data will appear on next call."
+                : "[CONNECTION] Was stale, re-established. Earlier data may be incomplete; new data will appear on next call.",
         };
     }
 

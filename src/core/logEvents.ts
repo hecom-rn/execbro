@@ -34,7 +34,7 @@ export interface RawLogLine {
      * app identifier ordinary os_log output has — the bundle id appears
      * nowhere in a CFNetwork or UIKit message. Distinct from `subject`, which
      * is the app a line is ABOUT: a jetsam kill has process "runningboardd"
-     * and subject "com.gifted.production", and attributing it needs both.
+     * and subject "com.example.appa", and attributing it needs both.
      */
     process?: string;
     raw: string;
@@ -77,7 +77,7 @@ export interface AppIdentity {
     /** Live pid, when the app is running. Absent after a crash. */
     pid?: number;
     /**
-     * iOS executable name (bundle id "com.gifted.production" -> "Gifted").
+     * iOS executable name (bundle id "com.example.appa" -> "AppA").
      *
      * The iOS counterpart to `pid`: it is what attributes a line to the app,
      * and like `pid` its absence must disable that rule rather than weaken it.

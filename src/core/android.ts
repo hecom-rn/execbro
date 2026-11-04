@@ -216,8 +216,9 @@ export async function getDefaultAndroidDevice(): Promise<string | null> {
 }
 
 /**
- * Locate the `emulator` binary. Returns the command string to invoke it
- * (either bare "emulator" if it's on PATH, or a quoted absolute path).
+ * Locate the `emulator` binary. Returns the command to pass to `execFile`
+ * (either bare "emulator" if it's on PATH, or an absolute path, unquoted:
+ * `execFile` runs no shell, so quotes would become part of the filename).
  * Returns null when the binary cannot be located. Mirrors `isAdbAvailable`'s
  * PATH → ANDROID_HOME → common-install-paths discovery order.
  */
@@ -238,7 +239,7 @@ async function findEmulatorBinary(): Promise<string | null> {
     for (const candidate of candidates) {
         try {
             await execFileAsync(candidate, ["-help"], { timeout: 3000 });
-            return `"${candidate}"`;
+            return candidate;
         } catch {
             // try next
         }
@@ -616,6 +617,27 @@ export const ANDROID_KEY_EVENTS = {
     APP_SWITCH: 187,
     ESCAPE: 111
 } as const;
+
+/** press_key names (DOM KeyboardEvent.key) to Android keycodes. Letters and digits are added below. */
+const KEY_TO_ANDROID: Record<string, number> = {
+    Enter: 66, Tab: 61, Backspace: 67, Delete: 112, Escape: 111, " ": 62,
+    ArrowUp: 19, ArrowDown: 20, ArrowLeft: 21, ArrowRight: 22,
+    Home: 122, End: 123, PageUp: 92, PageDown: 93,
+    ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`F${i + 1}`, 131 + i])),
+    ...Object.fromEntries(Array.from({ length: 26 }, (_, i) => [String.fromCharCode(97 + i), 29 + i])),
+    ...Object.fromEntries(Array.from({ length: 10 }, (_, i) => [String(i), 7 + i])),
+};
+
+/** A parsed press_key combo as an Android keycode. `adb shell input keyevent` sends no modifiers, so a combo is refused. */
+export function androidKeyFor(combo: { mods: number; key: { key: string } }): { keycode: number } | { error: string } {
+    if (combo.mods !== 0) {
+        return { error: "Modifier combos (Shift, Control, Alt, Meta) are not supported on Android: adb input keyevent sends no modifiers. Press the key alone, or use input_text for text." };
+    }
+    const keycode = KEY_TO_ANDROID[combo.key.key];
+    return keycode === undefined
+        ? { error: `"${combo.key.key}" has no Android keycode here. Named keys, a-z and 0-9 are supported; use input_text for other characters.` }
+        : { keycode };
+}
 
 /**
  * Tap at coordinates on an Android device

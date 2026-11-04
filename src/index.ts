@@ -6,6 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createServer as createHttpServer, type ServerResponse } from "node:http";
 
 import { DECISION_TREE, UNTRUSTED_DATA_RULE } from "./core/guides.js";
+import { redactionEnabled, REDACTION_OFF_NOTE } from "./core/redact.js";
 import {
     connectedApps,
     cancelAllReconnectionTimers,
@@ -23,6 +24,7 @@ import { registerReduxTools } from "./tools/reduxTools.js";
 import { registerExecutionTools } from "./tools/executionTools.js";
 import { registerLogTools } from "./tools/logTools.js";
 import { registerNetworkTools } from "./tools/networkTools.js";
+import { registerTimelineTools } from "./tools/timelineTools.js";
 import { registerRequestTools } from "./tools/requestTools.js";
 import { registerNavigationTools } from "./tools/navigationTools.js";
 import { registerBundleTools } from "./tools/bundleTools.js";
@@ -56,7 +58,10 @@ export const SERVER_INSTRUCTIONS: string = [
     "",
     DECISION_TREE,
     "",
-    "Call get_usage_guide with no arguments for the same decision tree plus a summary of every guide."
+    "Call get_usage_guide with no arguments for the same decision tree plus a summary of every guide.",
+    // Said once at connect, so the agent can warn the user before a token
+    // lands in the transcript rather than after.
+    ...(redactionEnabled() ? [] : ["", REDACTION_OFF_NOTE])
 ].join("\n");
 
 const server = new McpServer(
@@ -78,6 +83,7 @@ registerReduxTools(server);
 registerExecutionTools(server);
 registerLogTools(server);
 registerNetworkTools(server);
+registerTimelineTools(server);
 registerRequestTools(server);
 registerNavigationTools(server);
 registerBundleTools(server);

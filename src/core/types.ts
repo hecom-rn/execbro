@@ -41,11 +41,13 @@ export interface DeviceInfo {
     type: string;
     webSocketDebuggerUrl: string;
     deviceName: string;
+    // Chromium /json only: the page URL. Metro targets do not carry it.
+    url?: string;
 }
 
 // Connected app info
-/** Platforms the device layer can address. "harmony" = OpenHarmony/HarmonyOS via hdc. */
-export type DevicePlatform = "ios" | "android" | "harmony";
+/** Platforms the device layer can address. "harmony" = OpenHarmony/HarmonyOS via hdc. "chromium" = Electron / Chrome over CDP. */
+export type DevicePlatform = "ios" | "android" | "harmony" | "chromium";
 
 export interface ConnectedApp {
     ws: WebSocket;
@@ -69,6 +71,12 @@ export interface ConnectedApp {
     // attribution resolves per call, cached here so get_apps can show the
     // real identity instead of a device-name fallback.
     harmonyBundleName?: string;
+    // Set for a native Android app reached through execbro-sdk-android over an
+    // adb-forwarded local socket instead of CDP. Absent means CDP (React Native
+    // or chromium). platform stays "android" so the adb paths recognise it.
+    runtime?: "native";
+    nativePackage?: string;
+    nativeCapabilities?: string[];
     lastScreenshot?: {
         originalWidth: number;
         originalHeight: number;
@@ -205,6 +213,10 @@ export interface NetworkRequest {
     completed: boolean;
     // See LogEntry.epoch.
     epoch: number;
+    /** Set only on rows of a merged all-devices read. */
+    device?: string;
+    /** Server-side capture layer that wrote the row; absent on SDK-mirrored rows. */
+    capturedBy?: "cdp" | "interceptor";
     // Response payload. Populated by the SDK mirror and by the injected JS
     // interceptor's XHR layer (capped at 32 KB in-app before serialization).
     // The CDP path does not capture response bodies.
@@ -297,6 +309,8 @@ export interface EnsureConnectionDeviceInfo {
     uptime: string;
     contextId: number | null;
     healthCheckPassed: boolean;
+    /** chromium: the page is paused by this JavaScript dialog (formatDialog text), so it was not health-checked or reconnected. */
+    dialog?: string;
 }
 
 // Result of ensure_connection. `connected` is true when at least one app has

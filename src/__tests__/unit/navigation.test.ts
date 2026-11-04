@@ -100,7 +100,7 @@ describe("buildNavHandlesSource", () => {
     });
 
     it("prefers the library module over an app-exposed global wrapper", () => {
-        // Boardwise's __EXPO_ROUTER__ is a hand-built wrapper carrying its own
+        // AppB's __EXPO_ROUTER__ is a hand-built wrapper carrying its own
         // {router, currentPath, segments, ...}, not the library's router.
         const wrapper = { router: expoRouter, navigate: () => undefined, currentPath: "/" };
         const out = resolveWith({ __EB_TEST_MODULE_ROUTER__: expoRouter, __EXPO_ROUTER__: wrapper });
@@ -151,6 +151,13 @@ describe("buildRouteTableSource", () => {
         expect(out.levels).toHaveLength(2);
         expect(out.all).toEqual(expect.arrayContaining(["__root", "+not-found", "index", "explore", "calendar"]));
         expect(out.current).toBe("explore");
+    });
+
+    it("gives the same route name with new params a different identity", () => {
+        const state = { routeNames: ["GALLERY"], index: 0, routes: [{ name: "GALLERY" }] };
+        const a = tableWith(state, { key: "g-1", name: "GALLERY", params: { id: 1 } }) as unknown as { currentId: string };
+        const b = tableWith(state, { key: "g-1", name: "GALLERY", params: { id: 2 } }) as unknown as { currentId: string };
+        expect(a.currentId).not.toBe(b.currentId);
     });
 
     it("dedupes names that appear at more than one level", () => {
@@ -259,6 +266,30 @@ describe("buildNavigateSource", () => {
         expect(out.ok).toBe(true);
         expect(calls).toContain("navigate:TarotNav");
         expect(out.before).toBe("Home");
+    });
+
+    it("addresses a screen in an unfocused nested navigator from the root", () => {
+        const calls: unknown[] = [];
+        const stub = {
+            __EB_TEST_FIBER_NAV__: {
+                navigate: (name: string, p?: unknown) => calls.push([name, p]),
+                resetRoot: () => undefined,
+                getCurrentRoute: () => ({ name: "Tanstack" }),
+                getRootState: () => ({
+                    routeNames: ["Tabs"], index: 0,
+                    routes: [{ name: "Tabs", state: {
+                        routeNames: ["UiTab", "NetworkTab"], index: 1,
+                        routes: [
+                            { name: "UiTab", state: { routeNames: ["TapTargets", "Gallery"], index: 0, routes: [{ name: "TapTargets" }] } },
+                            { name: "NetworkTab", state: { routeNames: ["Tanstack"], index: 0, routes: [{ name: "Tanstack" }] } }
+                        ]
+                    } }]
+                })
+            }
+        };
+        const out = run(stub, "navigate", "Gallery", { id: 2 });
+        expect(out.ok).toBe(true);
+        expect(calls).toEqual([["Tabs", { screen: "UiTab", params: { screen: "Gallery", params: { id: 2 } } }]]);
     });
 
     it("rejects an unknown route name before dispatching", () => {

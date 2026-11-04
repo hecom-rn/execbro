@@ -119,7 +119,7 @@ describe("runNativePipeline", () => {
         // that is indistinguishable from a silent device — the pipeline has to
         // say that it fetched something and the floor ate it.
         const lines = [
-            line({ pid: 23325, tag: "default", level: "log", message: "Identity resolved as app<com.boardwise.app>" }),
+            line({ pid: 23325, tag: "default", level: "log", message: "Identity resolved as app<com.example.appb>" }),
             line({ pid: 23325, tag: "default", level: "log", message: "kExcludedFromBackupXattrName set on path: /HTTPStorages" }),
             line({ pid: 23325, tag: "nativeloader", level: "debug", message: "Load librnscreens.so: ok" }),
         ];
@@ -132,7 +132,7 @@ describe("runNativePipeline", () => {
 
     it("stays silent about the floor when events survived it", () => {
         const lines = [
-            line({ pid: 23325, tag: "default", level: "log", message: "Identity resolved as app<com.boardwise.app>" }),
+            line({ pid: 23325, tag: "default", level: "log", message: "Identity resolved as app<com.example.appb>" }),
             line({ pid: 23325, tag: "X", level: "warn", message: "Something worth showing" }),
         ];
         const { events, belowFloor } = runNativePipeline(lines, APP, "iPad Air", { minLevel: "warn" });
@@ -163,8 +163,8 @@ describe("collectNativeEvents — iOS os_log Default floor", () => {
     // os_log() call emits, and every one of these records is dropped by
     // minLevel="info". The read then looks exactly like a silent device.
     const IOS_NDJSON = [
-        { messageType: "Default", eventMessage: "Identity resolved as app<com.boardwise.app((null))>" },
-        { messageType: "Default", eventMessage: "kExcludedFromBackupXattrName set on path: /HTTPStorages/com.boardwise.app" },
+        { messageType: "Default", eventMessage: "Identity resolved as app<com.example.appb((null))>" },
+        { messageType: "Default", eventMessage: "kExcludedFromBackupXattrName set on path: /HTTPStorages/com.example.appb" },
     ]
         .map((rec, i) => JSON.stringify({
             ...rec,
@@ -194,10 +194,10 @@ describe("collectNativeEvents — iOS os_log Default floor", () => {
             summary: { booted: 1, total: 1 },
         } as ListAllDevicesResult);
         listDevicesMock.mockReturnValue([
-            memoryRow({ identifier: "SIM-1", name: "iPad Air 13-inch (M3)", platform: "ios", appId: "com.boardwise.app" }),
+            memoryRow({ identifier: "SIM-1", name: "iPad Air 13-inch (M3)", platform: "ios", appId: "com.example.appb" }),
         ]);
         execAsyncMock.mockImplementation(async (_file: string, args: string[]) => {
-            if (args.includes("get_app_container")) return { stdout: "/x/Boardwise.app\n", stderr: "" };
+            if (args.includes("get_app_container")) return { stdout: "/x/AppB.app\n", stderr: "" };
             return { stdout: IOS_NDJSON, stderr: "" };
         });
     });
@@ -249,7 +249,7 @@ describe("identityFromMemory", () => {
             memoryRow({
                 identifier: "sdk_gphone16k_arm64 - 16 - API 36",
                 name: "sdk_gphone16k_arm64 - 16 - API 36",
-                appId: "com.gifted.production",
+                appId: "com.example.appa",
             }),
         ]);
 
@@ -262,7 +262,7 @@ describe("identityFromMemory", () => {
         expect(identity).toEqual({
             deviceKey: "emulator-5554",
             platform: "android",
-            appId: "com.gifted.production",
+            appId: "com.example.appa",
         });
     });
 
@@ -297,7 +297,7 @@ describe("resolveLogTargets", () => {
         const app = {
             deviceInfo: {
                 deviceName: "sdk_gphone16k_arm64 - 16 - API 36",
-                appId: "com.gifted.production",
+                appId: "com.example.appa",
             },
             platform: "android",
             adbSerial: "emulator-5554",
@@ -321,7 +321,7 @@ describe("resolveLogTargets", () => {
             identifier: "emulator-5554",
             name: "sdk_gphone16k_arm64 - 16 - API 36",
             platform: "android",
-            appId: "com.gifted.production",
+            appId: "com.example.appa",
         });
     });
 
@@ -366,6 +366,41 @@ describe("resolveLogTargets", () => {
             platform: "android",
             appId: "com.rndebuggertestapp",
         });
+    });
+
+    it("keeps the React Native app's identity when a native SDK app shares the device", async () => {
+        // A native (execbro-sdk-android) app always carries adbSerial, so the
+        // serial-keyed lookup would pick it over the RN app whose adbSerial is
+        // null, and logcat would be attributed to the wrong package.
+        const rn = {
+            deviceInfo: { deviceName: "sdk_gphone16k_arm64 - 16 - API 36", appId: "com.rndebuggertestapp" },
+            platform: "android",
+            adbSerial: null,
+        } as unknown as ConnectedApp;
+        const native = {
+            deviceInfo: { deviceName: "TouchDisabler", appId: "com.ihorzheludkov.touchdisabler" },
+            platform: "android",
+            adbSerial: "emulator-5554",
+            runtime: "native",
+            nativePackage: "com.ihorzheludkov.touchdisabler",
+        } as unknown as ConnectedApp;
+        connectedAppsMock.set("native:emulator-5554:com.ihorzheludkov.touchdisabler", native);
+        connectedAppsMock.set("rn-key", rn);
+
+        execAsyncMock.mockResolvedValue({ stdout: "sdk_gphone16k_arm64\n", stderr: "" });
+        listAllDevicesMock.mockResolvedValue({
+            ...emptyDiscovery(),
+            android: {
+                available: true,
+                emulators: [{ name: "Pixel_9_-_16kb", serial: "emulator-5554", state: "running" }],
+                physical: [],
+            },
+        });
+
+        const targets = await resolveLogTargets();
+
+        expect(targets).toHaveLength(1);
+        expect(targets[0].identity?.appId).toBe("com.rndebuggertestapp");
     });
 
     it("yields no live identity when the model does not match any connected app", async () => {

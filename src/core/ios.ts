@@ -1,4 +1,5 @@
 import { existsSync } from "fs";
+import { writeFile } from "fs/promises";
 import path from "path";
 import os from "os";
 import sharp from "sharp";
@@ -66,6 +67,9 @@ async function runAxe(
   const axePath = getAxePath();
   const { stdout, stderr } = await execFileAsync(axePath, args, {
     timeout: AXE_TIMEOUT,
+    // describe-ui on a dense screen passes Node's 1 MB default and failed as
+    // "stdout maxBuffer length exceeded", silently dropping the accessibility strategy.
+    maxBuffer: 32 * 1024 * 1024,
   });
   return {
     stdout: stdout.trim(),
@@ -83,6 +87,9 @@ async function runIdb(
   const idbPath = getIdbPath();
   const { stdout, stderr } = await execFileAsync(idbPath, args, {
     timeout: IDB_TIMEOUT,
+    // describe-ui on a dense screen passes Node's 1 MB default and failed as
+    // "stdout maxBuffer length exceeded", silently dropping the accessibility strategy.
+    maxBuffer: 32 * 1024 * 1024,
   });
   return {
     stdout: stdout.trim(),
@@ -479,39 +486,35 @@ export async function findSimulatorByName(
     });
 
     const data = JSON.parse(stdout);
-    const normalizedDeviceName = deviceName.toLowerCase().trim();
-
-    for (const devices of Object.values(data.devices)) {
-      if (!Array.isArray(devices)) continue;
-
-      for (const device of devices as Array<{
-        udid: string;
-        name: string;
-        state: string;
-      }>) {
-        if (device.state !== "Booted") continue;
-
-        const normalizedSimName = device.name.toLowerCase().trim();
-
-        // Exact match
-        if (normalizedSimName === normalizedDeviceName) {
-          return device.udid;
-        }
-
-        // Partial match (deviceName contains simulator name or vice versa)
-        if (
-          normalizedSimName.includes(normalizedDeviceName) ||
-          normalizedDeviceName.includes(normalizedSimName)
-        ) {
-          return device.udid;
-        }
-      }
-    }
-
-    return null;
+    const booted = (Object.values(data.devices).filter(Array.isArray).flat() as Array<{
+      udid: string;
+      name: string;
+      state: string;
+    }>).filter((d) => d.state === "Booted");
+    return pickSimulatorByName(booted, deviceName);
   } catch {
     return null;
   }
+}
+
+/**
+ * An exact name wins over any partial one, and a partial match counts only when
+ * it is the only one. Returning the first partial hit linked "iPhone 17 Pro Max"
+ * to the booted "iPhone 17 Pro" whenever simctl listed that one first, so both
+ * apps got one UDID and every UDID-scoped tool hit the wrong simulator.
+ */
+export function pickSimulatorByName(
+  booted: Array<{ udid: string; name: string }>,
+  deviceName: string,
+): string | null {
+  const wanted = deviceName.toLowerCase().trim();
+  const exact = booted.find((d) => d.name.toLowerCase().trim() === wanted);
+  if (exact) return exact.udid;
+  const partial = booted.filter((d) => {
+    const name = d.name.toLowerCase().trim();
+    return name.includes(wanted) || wanted.includes(name);
+  });
+  return partial.length === 1 ? partial[0].udid : null;
 }
 
 /**
@@ -558,13 +561,22 @@ export async function iosScreenshot(
     // Generate output path if not provided
     const finalOutputPath = outputPath || defaultScreenshotPath();
 
-    await execFileAsync(
-      "xcrun",
-      ["simctl", "io", targetUdid, "screenshot", finalOutputPath],
-      {
-        timeout: SIMCTL_TIMEOUT,
-      },
-    );
+    const [, { rotation }] = await Promise.all([
+      execFileAsync(
+        "xcrun",
+        ["simctl", "io", targetUdid, "screenshot", finalOutputPath],
+        {
+          timeout: SIMCTL_TIMEOUT,
+        },
+      ),
+      getUiRotation(targetUdid, true),
+    ]);
+    // simctl captures the portrait framebuffer; turn it to the app's frame so
+    // the image and every layout coordinate agree.
+    if (rotation !== "none") {
+      const turned = await sharp(finalOutputPath).rotate(rotation === "ccw" ? -90 : 90).toBuffer();
+      await writeFile(finalOutputPath, turned);
+    }
 
     return await finalizeScreenshotFile(finalOutputPath);
   } catch (error) {
@@ -901,6 +913,78 @@ export async function iosBootSimulator(udid: string): Promise<iOSResult> {
 // ============================================================================
 
 /**
+ * How the app's UI is turned relative to the simulator's native portrait frame.
+ *
+ * Verified on an iOS 26 simulator: in landscape, React Native and AXe
+ * describe-ui both speak landscape points (874x402), while AXe's touch
+ * injection and simctl's screenshot stay in the portrait native frame
+ * (402x874). Every tap aimed with app coordinates missed, and still reported
+ * success. Device orientation 3 needs "ccw", 4 needs "cw" (both checked by
+ * hand); anything else with a landscape app keeps the last direction seen.
+ */
+export type UiRotation = "none" | "ccw" | "cw";
+
+const ORIENTATION_TTL_MS = 3000;
+const orientationCache = new Map<string, { value: number; expires: number }>();
+const lastLandscape = new Map<string, "ccw" | "cw">();
+
+async function readDeviceOrientation(udid: string, fresh: boolean): Promise<number | null> {
+  const cached = orientationCache.get(udid);
+  if (!fresh && cached && cached.expires > Date.now()) return cached.value;
+  try {
+    const { stdout } = await execFileAsync(
+      "xcrun",
+      ["simctl", "spawn", udid, "notifyutil", "-g", "com.apple.backboardd.orientation"],
+      { timeout: SIMCTL_TIMEOUT },
+    );
+    const value = Number(stdout.trim().split(/\s+/).pop());
+    if (!Number.isFinite(value)) return null;
+    // The cached root frame says which way the app is turned; it is stale the
+    // moment the device turns, and unknown on the first read (it may predate one).
+    if (!cached || cached.value !== value) {
+      safeAreaTopCache.delete(udid);
+      safeAreaTopCache.delete("__default__");
+    }
+    // ponytail: 3s reuse so a tap after its own screenshot pays nothing; a rotation inside that window misaims one call.
+    orientationCache.set(udid, { value, expires: Date.now() + ORIENTATION_TTL_MS });
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+export async function getUiRotation(
+  udid: string,
+  fresh = false,
+): Promise<{ rotation: UiRotation; app: { width: number; height: number } | null }> {
+  const orientation = await readDeviceOrientation(udid, fresh);
+  const app = await getIOSScreenPointSize(udid);
+  if (!app || app.width <= app.height) return { rotation: "none", app };
+  let rotation: "ccw" | "cw" = lastLandscape.get(udid) ?? "ccw";
+  if (orientation === 3) rotation = "ccw";
+  if (orientation === 4) rotation = "cw";
+  lastLandscape.set(udid, rotation);
+  return { rotation, app };
+}
+
+/** App-frame point -> the native portrait point AXe/IDB inject at. */
+export function toNativePoint(
+  x: number,
+  y: number,
+  rotation: UiRotation,
+  app: { width: number; height: number },
+): [number, number] {
+  if (rotation === "ccw") return [app.height - y, x];
+  if (rotation === "cw") return [y, app.width - x];
+  return [x, y];
+}
+
+async function nativeMapper(udid: string): Promise<(x: number, y: number) => [number, number]> {
+  const { rotation, app } = await getUiRotation(udid);
+  return (x, y) => (app ? toNativePoint(x, y, rotation, app) : [x, y]);
+}
+
+/**
  * Tap at coordinates on an iOS simulator using IDB
  */
 export async function iosTap(
@@ -913,8 +997,9 @@ export async function iosTap(
     if (!preflight.ready) return preflight.error;
     const { driver, targetUdid } = preflight;
 
-    const xRounded = Math.round(x);
-    const yRounded = Math.round(y);
+    const [nx, ny] = (await nativeMapper(targetUdid))(x, y);
+    const xRounded = Math.round(nx);
+    const yRounded = Math.round(ny);
 
     if (driver === "axe") {
       if (options?.duration !== undefined) {
@@ -956,7 +1041,7 @@ export async function iosTap(
 
     return {
       success: true,
-      result: `Tapped at (${xRounded}, ${yRounded})`,
+      result: `Tapped at (${Math.round(x)}, ${Math.round(y)})`,
     };
   } catch (error) {
     return {
@@ -981,10 +1066,9 @@ export async function iosSwipe(
     if (!preflight.ready) return preflight.error;
     const { driver, targetUdid } = preflight;
 
-    const x1 = Math.round(startX);
-    const y1 = Math.round(startY);
-    const x2 = Math.round(endX);
-    const y2 = Math.round(endY);
+    const toNative = await nativeMapper(targetUdid);
+    const [x1, y1] = toNative(startX, startY).map(Math.round);
+    const [x2, y2] = toNative(endX, endY).map(Math.round);
 
     if (driver === "axe") {
       const args: string[] = [
@@ -1022,7 +1106,7 @@ export async function iosSwipe(
 
     return {
       success: true,
-      result: `Swiped from (${x1}, ${y1}) to (${x2}, ${y2})`,
+      result: `Swiped from (${Math.round(startX)}, ${Math.round(startY)}) to (${Math.round(endX)}, ${Math.round(endY)})`,
     };
   } catch (error) {
     return {
@@ -1160,6 +1244,51 @@ export async function iosKeyEvent(
       success: false,
       error: `Failed to send key event: ${error instanceof Error ? error.message : String(error)}`,
     };
+  }
+}
+
+/** press_key names (DOM KeyboardEvent.key) to HID usage codes. Letters and digits are added below. */
+const KEY_TO_HID: Record<string, number> = {
+  Enter: 40, Escape: 41, Backspace: 42, Tab: 43, " ": 44,
+  ArrowRight: 79, ArrowLeft: 80, ArrowDown: 81, ArrowUp: 82,
+  Home: 74, PageUp: 75, Delete: 76, End: 77, PageDown: 78,
+  ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`F${i + 1}`, 58 + i])),
+  ...Object.fromEntries(Array.from({ length: 26 }, (_, i) => [String.fromCharCode(97 + i), 4 + i])),
+  ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [String(i + 1), 30 + i])),
+  "0": 39,
+};
+
+/** CDP modifier bits (chromium.ts MOD) to left-hand HID modifier codes: Control, Shift, Alt, Command. */
+const MOD_BIT_TO_HID: Array<[number, number]> = [[2, 224], [8, 225], [1, 226], [4, 227]];
+
+/**
+ * A parsed press_key combo as HID codes. Character keys are key positions, so a
+ * non-US active keyboard layout turns them into that layout's letters; named keys
+ * are layout-independent.
+ */
+export function hidKeyFor(combo: { mods: number; key: { key: string } }): { keycode: number; modifiers: number[] } | { error: string } {
+  const keycode = KEY_TO_HID[combo.key.key];
+  if (keycode === undefined) {
+    return { error: `"${combo.key.key}" has no HID keycode here. Named keys, a-z and 0-9 are supported; use input_text for other characters.` };
+  }
+  return { keycode, modifiers: MOD_BIT_TO_HID.filter(([bit]) => combo.mods & bit).map(([, hid]) => hid) };
+}
+
+/**
+ * Hold modifiers and press one key (AXe key-combo). IDB has no combo command,
+ * so under IDB this is refused rather than sent as separate presses.
+ */
+export async function iosKeyCombo(modifiers: number[], keycode: number, udid?: string): Promise<iOSResult> {
+  if (getIosDriver() !== "axe") {
+    return { success: false, error: "Modifier combos need the AXe driver (brew install cameroncooke/axe/axe, then unset IOS_DRIVER): IDB has no key-combo command." };
+  }
+  try {
+    const preflight = await ensureUiDriverReady(udid);
+    if (!preflight.ready) return preflight.error;
+    await runAxe("key-combo", "--modifiers", modifiers.join(","), "--key", String(keycode), "--udid", preflight.targetUdid);
+    return { success: true, result: `Sent key combo: ${modifiers.join("+")}+${keycode}` };
+  } catch (error) {
+    return { success: false, error: `Failed to send key combo: ${error instanceof Error ? error.message : String(error)}` };
   }
 }
 
@@ -1393,7 +1522,7 @@ const IOS_SYSTEM_OVERLAY_LABEL_PATTERNS =
  * Telltale of an RN accessibilityLabel rollup vs a system-presented sheet:
  * a rollup concatenates multiple child labels with commas / newlines (3+ separators),
  * while a system sheet's label is a single sentence. Without this guard the label
- * patterns above false-positive on screens like gifted.co's login wrapper whose
+ * patterns above false-positive on screens like AppA's login wrapper whose
  * rollup happens to contain "Continue with" amongst many other phrases.
  */
 function looksLikeRNLabelRollup(label: string): boolean {
@@ -1904,7 +2033,7 @@ export async function iosGetUITree(udid?: string): Promise<{
  *       (newlines, commas, semicolons — RN rollup typically joins with `, ` or `\n`)
  *   (b) its frame covers >50% of the viewport (a real button never does this)
  *
- * Both heuristics together catch the gifted.co LoginScreen wrapper case the doc cites.
+ * Both heuristics together catch the AppA LoginScreen wrapper case the doc cites.
  */
 function isAggregatorWrapper(
   element: IOSUIElement,
@@ -2175,7 +2304,13 @@ export async function getDevicePixelRatio(
       }
       const screenSize = extractIOSScreenSize(stdout);
       if (screenSize) {
-        const dpr = calculateDPR(pixelWidth, screenSize.width);
+        // Long sides: in landscape the frame is 874 wide while simctl's
+        // capture stays portrait (1206), and 1206/874 rounded to a 1x scale
+        // that was then cached for the whole session.
+        const dpr = calculateDPR(
+          Math.max(pixelWidth, pixelHeight),
+          Math.max(screenSize.width, screenSize.height),
+        );
         dprCache.set(cacheKey, dpr);
         return dpr;
       }

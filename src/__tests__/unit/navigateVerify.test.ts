@@ -24,8 +24,8 @@ describe("classifyNavigationOutcome", () => {
 
     it("polls with a schedule long enough for an async dispatch to land", () => {
         // A same-evaluation read-back reported changed:false on a navigation
-        // that had succeeded (astro-app), so the first poll must not be
-        // immediate. gifted read fresh, so the schedule must also exit early —
+        // that had succeeded (AppC), so the first poll must not be
+        // immediate. AppA read fresh, so the schedule must also exit early —
         // that is covered by performNavigation, not the schedule itself.
         expect(POLL_DELAYS_MS[0]).toBeGreaterThanOrEqual(100);
         expect(POLL_DELAYS_MS.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(1500);

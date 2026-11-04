@@ -142,14 +142,14 @@ describe("isOwned on iOS", () => {
     const IOS: AppIdentity = {
         deviceKey: "F93612A3-0042-4BDC-855F-8CAB1BDD76C6",
         platform: "ios",
-        appId: "com.gifted.production",
-        processName: "Gifted",
+        appId: "com.example.appa",
+        processName: "AppA",
     };
 
     it("owns ordinary app output via the emitting process", () => {
         expect(isOwned(line({
             pid: 12736,
-            process: "Gifted",
+            process: "AppA",
             tag: "com.apple.CFNetwork:Default",
             message: "Task <B812CCCC>.<3> resuming, timeouts(10.0, 604800.0)",
         }), IOS)).toEqual({ owned: true, reason: "process" });
@@ -159,7 +159,7 @@ describe("isOwned on iOS", () => {
         // The case that broke: 758 of 878 lines looked exactly like this.
         expect(isOwned(line({
             pid: 12736,
-            process: "Gifted",
+            process: "AppA",
             tag: "com.apple.UIKit:KeyboardSceneDelegate",
             message: "Keyboard scene delegate resigned first responder",
         }), IOS)).toEqual({ owned: true, reason: "process" });
@@ -174,7 +174,7 @@ describe("isOwned on iOS", () => {
             process: "runningboardd",
             tag: "com.apple.runningboard:process",
             level: "error",
-            message: "Process com.gifted.production terminated: [jetsam] exceeded memory limit",
+            message: "Process com.example.appa terminated: [jetsam] exceeded memory limit",
         }), IOS)).toEqual({ owned: true, reason: "verdict" });
     });
 
@@ -205,7 +205,7 @@ describe("isOwned on iOS", () => {
         // absent identifier would own the whole device.
         expect(isOwned(line({
             pid: 12736,
-            process: "Gifted",
+            process: "AppA",
             tag: "com.apple.CFNetwork:Default",
             message: "Task resuming",
         }), { ...IOS, processName: undefined })).toEqual({ owned: false });

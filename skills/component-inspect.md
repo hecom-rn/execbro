@@ -44,7 +44,7 @@ Based on the task, inspect individual components:
 - Use `includeLayout=true` to get padding/margin/flex styles for matched components
 
 **By screen coordinates — pick the tool by what you need:**
-1. Take a screenshot (`ios_screenshot` / `android_screenshot`) to see the current screen
+1. Take a screenshot (`screenshot`) to see the current screen
 2. Identify the target element visually and read off its coordinates — no conversion needed: screenshots, `get_screen_state`, `get_screen_layout`, `measure`, `inspect_at_point` and `tap` all share one screen-space coordinate system, so a coordinate from any of them goes to any other unchanged
 3. Call `mcp__execbro__inspect_at_point(x, y)`. Pure JS hit test — no overlay flicker. Returns identity, FRAME PER ANCESTOR, full PROPS (handlers as `[Function]`, refs, testID, custom props), the node's own style, and `source: {file, line, column}` plus the owner chain.
 
@@ -99,7 +99,7 @@ For layout debugging:
 - All layout tools share one screen-space coordinate system — `get_screen_state`, `get_screen_layout`, `measure`, `inspect_at_point`, screenshots and `tap` speak the same coordinates. Pass a coordinate from any of them to any other unchanged; there is no pixel→point conversion to do.
 - `inspect_at_point` works on Paper, Fabric, and Bridgeless / new arch.
 - `inspect_at_point` returns frame per ancestor + props (handlers, refs, custom props). Pure JS — no overlay toggle, no visual side effect. Style is the node's own style object, not RN's merged cascade — when a value looks wrong and isn't on the node, walk the ancestors it returns.
-- `inspect_at_point` returns `source: {file, line, column}` — the absolute path and line where the component is rendered — plus the owner chain as `Source ancestors`. Resolved from the fiber's `_debugStack` via Metro symbolication, so it works on React 19 where `_debugSource` was dropped. `node_modules` frames are filtered out, so you land on your own code. If Metro is unreachable the response carries `sourceUnavailable` and identity + props are still returned. Pass `source=false` to skip resolution in tight loops.
+- `inspect_at_point` returns `source: {file, line, column}` — the absolute path and line where the component is rendered — plus the owner chain as `Source ancestors`, each line being where that component is rendered (its JSX in the parent), not its definition. Resolved from the fiber's `_debugStack` via Metro symbolication, so it works on React 19 where `_debugSource` was dropped. `node_modules` frames are filtered out, so you land on your own code. If Metro is unreachable the response carries `sourceUnavailable` and identity + props are still returned. Pass `source=false` to skip resolution in tight loops.
 - Layout data can be large for complex screens - use `find_components` with `includeLayout=true` for targeted queries
 - Use `device` param on any tool to target a specific device when multiple are connected (case-insensitive substring match, e.g. `device="iPhone"`)
 - **MCP server alias note:** examples use the alias `execbro` (tools prefixed `mcp__execbro__`). If you previously registered the server with the older alias `rn-ai-devtools`, substitute `mcp__rn-ai-devtools__` in these examples — both work, only the alias differs.
