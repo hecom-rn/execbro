@@ -73,4 +73,44 @@ describe("probeCdpAlive", () => {
         expect(alive).toBe(false);
         await close();
     });
+
+    it("resolves true when target replies with a structured -32601 method-not-found error (RNOH Bridgeless C++ connection)", async () => {
+        // RNOH's C++ inspector proxy implements Runtime.enable (console events
+        // flow) but not Runtime.evaluate: it answers every evaluate with a
+        // protocol-level MethodNotFound. A target that answers at all is alive —
+        // a zombie page answers nothing and only the timeout path reports it.
+        const { ws, close } = await openPair((socket) => {
+            socket.on("message", (data) => {
+                const msg = JSON.parse(data.toString());
+                socket.send(
+                    JSON.stringify({
+                        id: msg.id,
+                        error: { message: "Runtime.evaluate", code: -32601 }
+                    })
+                );
+            });
+        });
+
+        const alive = await probeCdpAlive(ws as unknown as WebSocket, 2000);
+        expect(alive).toBe(true);
+        await close();
+    });
+
+    it("resolves false on a different protocol error code (degenerate target)", async () => {
+        const { ws, close } = await openPair((socket) => {
+            socket.on("message", (data) => {
+                const msg = JSON.parse(data.toString());
+                socket.send(
+                    JSON.stringify({
+                        id: msg.id,
+                        error: { message: "Internal error", code: -32603 }
+                    })
+                );
+            });
+        });
+
+        const alive = await probeCdpAlive(ws as unknown as WebSocket, 500);
+        expect(alive).toBe(false);
+        await close();
+    });
 });
