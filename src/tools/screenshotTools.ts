@@ -651,6 +651,68 @@ async function chromiumScreenshotResponse(app: ConnectedApp, outputPath?: string
     };
 }
 
+async function harmonyScreenshotHandler({ outputPath, device }: { outputPath?: string; device?: string }) {
+    const resolved = await resolveHarmonyTargetKey(device);
+    if (!resolved.ok) return resolved.response;
+    const targetKey = resolved.targetKey ?? undefined;
+
+    const result = await harmonyScreenshot(outputPath, targetKey);
+    if (!result.success) {
+        return {
+            content: [{ type: "text" as const, text: `Error: ${result.error}` }],
+            isError: true
+        };
+    }
+
+    if (result.data) {
+        const pixelWidth = result.originalWidth || 0;
+        const pixelHeight = result.originalHeight || 0;
+        let infoText = `Screenshot captured (${pixelWidth}x${pixelHeight} device pixels). Coordinates are device pixels — pass them to tap() unchanged.`;
+
+        // Enrich from the RN app linked to this hdc target, if any.
+        const targetApp = getConnectedApps().find(
+            (e) => e.app.platform === "harmony" &&
+                (targetKey === undefined || e.app.harmonyTargetKey === targetKey)
+        )?.app;
+        if (targetApp) {
+            targetApp.lastScreenshot = {
+                originalWidth: pixelWidth,
+                originalHeight: pixelHeight,
+                scaleFactor: result.scaleFactor || 1,
+            };
+            infoText += `\nRN app connected: ${targetApp.deviceInfo.appId ?? targetApp.deviceInfo.deviceName} (route details via get_screen_state).`;
+        }
+
+        imageBuffer.add({
+            id: `harmony-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            image: result.data,
+            timestamp: Date.now(),
+            source: "harmony_screenshot",
+            metadata: {
+                width: pixelWidth,
+                height: pixelHeight,
+                scaleFactor: result.scaleFactor || 1,
+                platform: "harmony",
+            },
+        });
+
+        return {
+            content: [
+                { type: "text" as const, text: infoText },
+                {
+                    type: "image" as const,
+                    data: result.data.toString("base64"),
+                    mimeType: "image/jpeg"
+                }
+            ]
+        };
+    }
+
+    return {
+        content: [{ type: "text" as const, text: `Screenshot saved to: ${result.result}` }]
+    };
+}
+
 export function registerScreenshotTools(server: McpServer): void {
     // Tool: iOS screenshot
     registerToolWithTelemetry(
@@ -743,6 +805,8 @@ export function registerScreenshotTools(server: McpServer): void {
             const t = resolved.target;
             const shot = t.platform === "ios"
                 ? await iosScreenshotHandler({ outputPath, udid: t.iosUdid ?? device })
+                : t.platform === "harmony"
+                ? await harmonyScreenshotHandler({ outputPath, device: t.harmonyTargetKey ?? device })
                 : await androidScreenshotHandler({ outputPath, deviceId: t.androidSerial ?? device });
             return { ...shot, _targetPlatform: t.platform };
         }
@@ -762,67 +826,7 @@ export function registerScreenshotTools(server: McpServer): void {
                 device: z.string().optional().describe("HarmonyOS target: hdc target key or RN device substring. Omit for the only/first connected target.")
             }
         },
-        async ({ outputPath, device }) => {
-            const resolved = await resolveHarmonyTargetKey(device);
-            if (!resolved.ok) return resolved.response;
-            const targetKey = resolved.targetKey ?? undefined;
-
-            const result = await harmonyScreenshot(outputPath, targetKey);
-            if (!result.success) {
-                return {
-                    content: [{ type: "text" as const, text: `Error: ${result.error}` }],
-                    isError: true
-                };
-            }
-
-            if (result.data) {
-                const pixelWidth = result.originalWidth || 0;
-                const pixelHeight = result.originalHeight || 0;
-                let infoText = `Screenshot captured (${pixelWidth}x${pixelHeight} device pixels). Coordinates are device pixels — pass them to tap() unchanged.`;
-
-                // Enrich from the RN app linked to this hdc target, if any.
-                const targetApp = getConnectedApps().find(
-                    (e) => e.app.platform === "harmony" &&
-                        (targetKey === undefined || e.app.harmonyTargetKey === targetKey)
-                )?.app;
-                if (targetApp) {
-                    targetApp.lastScreenshot = {
-                        originalWidth: pixelWidth,
-                        originalHeight: pixelHeight,
-                        scaleFactor: result.scaleFactor || 1,
-                    };
-                    infoText += `\nRN app connected: ${targetApp.deviceInfo.appId ?? targetApp.deviceInfo.deviceName} (route details via get_screen_state).`;
-                }
-
-                imageBuffer.add({
-                    id: `harmony-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                    image: result.data,
-                    timestamp: Date.now(),
-                    source: "harmony_screenshot",
-                    metadata: {
-                        width: pixelWidth,
-                        height: pixelHeight,
-                        scaleFactor: result.scaleFactor || 1,
-                        platform: "harmony",
-                    },
-                });
-
-                return {
-                    content: [
-                        { type: "text" as const, text: infoText },
-                        {
-                            type: "image" as const,
-                            data: result.data.toString("base64"),
-                            mimeType: "image/jpeg"
-                        }
-                    ]
-                };
-            }
-
-            return {
-                content: [{ type: "text" as const, text: `Screenshot saved to: ${result.result}` }]
-            };
-        }
+        harmonyScreenshotHandler
     );
     // Tool: Get images from shared image buffer
     registerToolWithTelemetry(
