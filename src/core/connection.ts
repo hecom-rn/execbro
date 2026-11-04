@@ -2076,17 +2076,25 @@ export async function runQuickHealthCheck(app: ConnectedApp): Promise<boolean> {
                 clearTimeout(timeoutId);
                 pendingExecutions.delete(messageId);
 
+                // A structured -32601 (MethodNotFound) reply is a live CDP server
+                // refusing a method it does not implement — the RNOH Bridgeless
+                // C++ proxy answers every Runtime.evaluate this way while
+                // Runtime.enable (console events) still works. The channel spoke,
+                // so the context is as alive as it gets there; same rule as
+                // probeCdpAlive. A zombie page answers nothing and times out.
+                const channelAlive = result.success || (result.error ?? "").includes("-32601");
+
                 // Update context health tracking
                 const appKey = findAppKeyForDevice(app.deviceInfo);
                 if (appKey) {
                     updateContextHealth(appKey, {
                         lastHealthCheck: new Date(),
-                        lastHealthCheckSuccess: result.success,
-                        isStale: !result.success,
+                        lastHealthCheckSuccess: channelAlive,
+                        isStale: !channelAlive,
                     });
                 }
 
-                resolve(result.success);
+                resolve(channelAlive);
             },
             timeoutId,
         });
@@ -2109,37 +2117,57 @@ export async function runQuickHealthCheck(app: ConnectedApp): Promise<boolean> {
 
 const LOG_PIPELINE_MARKER_PREFIX = "__rn_devtools_health_";
 
+type MarkerProbe = "arrived" | "evaluate-unsupported" | "missing";
+
 /**
  * Inject a sentinel console.log via CDP and wait for it to appear in the log buffer.
- * Returns true if the marker arrives within TIMEOUT_MS.
+ * "arrived" when the marker shows up within TIMEOUT_MS; "evaluate-unsupported"
+ * when the target refuses the injection itself with a structured -32601 (the
+ * RNOH Bridgeless C++ proxy — passive console capture still works there);
+ * "missing" when the marker never shows up (pipeline genuinely broken).
  */
-async function sendAndWaitForMarker(app: ConnectedApp, buffer: LogBuffer): Promise<boolean> {
+async function sendAndWaitForMarker(app: ConnectedApp, buffer: LogBuffer): Promise<MarkerProbe> {
     const marker = `${LOG_PIPELINE_MARKER_PREFIX}${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const TIMEOUT_MS = 3000;
+
+    const injectionId = getNextMessageId();
+    let evaluateUnsupported = false;
+    const onMessage = (data: WebSocket.RawData) => {
+        try {
+            const msg = JSON.parse(data.toString());
+            if (msg.id === injectionId && msg.error?.code === -32601) evaluateUnsupported = true;
+        } catch { /* non-JSON frame — not ours */ }
+    };
+    app.ws.on("message", onMessage);
 
     try {
         app.ws.send(
             JSON.stringify({
-                id: getNextMessageId(),
+                id: injectionId,
                 method: "Runtime.evaluate",
                 params: { expression: `console.log("${marker}")`, returnByValue: true },
             })
         );
     } catch {
-        return false;
+        app.ws.off("message", onMessage);
+        return "missing";
     }
 
     // Poll the buffer for the marker (check every 50ms, up to TIMEOUT_MS)
     const startTime = Date.now();
+    let arrived = false;
     while (Date.now() - startTime < TIMEOUT_MS) {
         if (buffer.getAll().some(entry => entry.message.includes(marker))) {
             buffer.removeByText(marker);
-            return true;
+            arrived = true;
+            break;
         }
         await new Promise(resolve => setTimeout(resolve, 50));
     }
+    app.ws.off("message", onMessage);
 
-    return false;
+    if (evaluateUnsupported) return "evaluate-unsupported";
+    return arrived ? "arrived" : "missing";
 }
 
 export interface LogPipelineResult {
@@ -2159,12 +2187,21 @@ export interface LogPipelineResult {
  *
  * Returns { ok, recovered, message } — the caller decides what to show.
  */
+const EVALUATE_UNSUPPORTED_NOTE =
+    "[NOTE] Active log verification is unavailable on this target (Runtime.evaluate is not implemented — RNOH Bridgeless C++ proxy). Console events are still recorded as the app emits them; act on the entries you have.";
+
 export async function verifyLogPipeline(app: ConnectedApp): Promise<LogPipelineResult> {
     const deviceName = app.deviceInfo.deviceName || app.deviceInfo.title || "unknown";
     const buffer = getLogBuffer(deviceName);
 
     // --- Attempt 1: quick check ---
-    if (await sendAndWaitForMarker(app, buffer)) {
+    let probe = await sendAndWaitForMarker(app, buffer);
+    if (probe === "evaluate-unsupported") {
+        // Passive capture works here; the recovery steps below cannot help and
+        // the forced reconnect would only drop the working event stream.
+        return { ok: true, recovered: false, message: EVALUATE_UNSUPPORTED_NOTE };
+    }
+    if (probe === "arrived") {
         return { ok: true, recovered: false, message: null };
     }
 
@@ -2180,7 +2217,11 @@ export async function verifyLogPipeline(app: ConnectedApp): Promise<LogPipelineR
     // Brief pause for domain activation
     await new Promise(resolve => setTimeout(resolve, 300));
 
-    if (await sendAndWaitForMarker(app, buffer)) {
+    probe = await sendAndWaitForMarker(app, buffer);
+    if (probe === "evaluate-unsupported") {
+        return { ok: true, recovered: false, message: EVALUATE_UNSUPPORTED_NOTE };
+    }
+    if (probe === "arrived") {
         return { ok: true, recovered: true, message: "[CONNECTION] Log pipeline was stale — re-enabled CDP domains. Logs are flowing again." };
     }
 
@@ -2217,7 +2258,11 @@ export async function verifyLogPipeline(app: ConnectedApp): Promise<LogPipelineR
     const freshDeviceName = freshApp.deviceInfo.deviceName || freshApp.deviceInfo.title || "unknown";
     const freshBuffer = getLogBuffer(freshDeviceName);
 
-    if (await sendAndWaitForMarker(freshApp, freshBuffer)) {
+    const freshProbe = await sendAndWaitForMarker(freshApp, freshBuffer);
+    if (freshProbe === "evaluate-unsupported") {
+        return { ok: true, recovered: true, message: `[CONNECTION] Log pipeline was broken — reconnected and verified. ${EVALUATE_UNSUPPORTED_NOTE}` };
+    }
+    if (freshProbe === "arrived") {
         return {
             ok: true,
             recovered: true,

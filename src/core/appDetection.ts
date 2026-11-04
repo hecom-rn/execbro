@@ -136,7 +136,29 @@ export function scheduleAppDetection(app: ConnectedApp): void {
         setTimeout(async () => {
             try {
                 const result = await detectApp(app.ws);
-                if (result) {
+                if (result === EVALUATE_UNSUPPORTED) {
+                    // Runtime.evaluate is not implemented here, but the channel
+                    // speaks. PlatformConstants is unreachable, so attribute the
+                    // platform the way the probe-result path does when the JS
+                    // read fails — the RNOH hilog marker — instead of leaving the
+                    // connect-time "android" default that would aim native tools
+                    // at adb (and the wrong device).
+                    if (!app.adbSerial && !app.simulatorUdid) {
+                        void import("./harmony.js")
+                            .then(async (h) => {
+                                const rnohKey = await h.detectRnohTarget();
+                                if (rnohKey) {
+                                    app.platform = "harmony";
+                                    app.harmonyTargetKey = rnohKey;
+                                    if (app.appDetection) {
+                                        app.appDetection = { ...app.appDetection, appPlatform: "harmony", detectionSource: "rnoh-hilog" };
+                                    }
+                                    console.error(`[execbro] HarmonyOS detected via RNOH hilog marker (Runtime.evaluate unavailable): ${rnohKey}`);
+                                }
+                            })
+                            .catch(() => {});
+                    }
+                } else if (result) {
                     const parsed = parseDetectionResult(result, platform);
                     if (parsed) {
                         parsed.detectionSource = "probe";
@@ -200,7 +222,17 @@ export function awaitAppDetection(app: ConnectedApp, timeoutMs: number): Promise
     ]);
 }
 
-function detectApp(ws: WebSocket): Promise<Record<string, unknown> | null> {
+/**
+ * detectApp's sentinel: the CDP channel answered, but with a structured
+ * -32601 (MethodNotFound) — the RNOH Bridgeless C++ proxy refuses
+ * Runtime.evaluate while Runtime.enable (console events for get_logs) still
+ * works. A null return means the target never answered at all; this sentinel
+ * means it answered and said "not implemented", so the caller can still
+ * attribute the platform by other means.
+ */
+export const EVALUATE_UNSUPPORTED = Symbol("evaluate-unsupported");
+
+export function detectApp(ws: WebSocket): Promise<Record<string, unknown> | typeof EVALUATE_UNSUPPORTED | null> {
     return new Promise((resolve) => {
         if (ws.readyState !== WebSocket.OPEN) {
             resolve(null);
@@ -221,6 +253,10 @@ function detectApp(ws: WebSocket): Promise<Record<string, unknown> | null> {
                 ws.removeListener("message", handler);
                 clearTimeout(timeout);
 
+                if (message.error?.code === -32601) {
+                    resolve(EVALUATE_UNSUPPORTED);
+                    return;
+                }
                 if (message.result?.result?.value) {
                     resolve(message.result.result.value);
                 } else {

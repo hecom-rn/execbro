@@ -41,6 +41,16 @@ export async function probeCdpAlive(
             try {
                 const msg = JSON.parse(data.toString());
                 if (msg.id !== id) return;
+                // A structured -32601 (MethodNotFound) answer is a live CDP
+                // server refusing a method it does not implement: the RNOH
+                // Bridgeless C++ proxy answers every Runtime.evaluate this way
+                // while Runtime.enable (console events) still works. Only a
+                // zombie target answers nothing at all, and that is what the
+                // timeout path is for — so treat this as alive.
+                if (msg?.error?.code === -32601) {
+                    finish(true);
+                    return;
+                }
                 const value = msg?.result?.result?.value;
                 finish(value === 2);
             } catch {

@@ -112,7 +112,7 @@ export interface AppDetectionResult {
     // "probe" = full Runtime.evaluate succeeded; "device-info" = inferred from
     // Metro /json DeviceInfo at connect time. Presumptive entries may be upgraded
     // later when the probe completes.
-    detectionSource?: "probe" | "device-info";
+    detectionSource?: "probe" | "device-info" | "rnoh-hilog";
 }
 
 // CDP RemoteObject type (result of Runtime.evaluate)
