@@ -3,7 +3,7 @@ import { jest } from "@jest/globals";
 const executeInApp = jest.fn<any>();
 jest.unstable_mockModule("../../core/executor.js", () => ({ executeInApp }));
 
-const { mirrorOnce, __resetMirrorState, markCdpConsoleOpen, markCdpConsoleSeen, markCdpConsoleClosed, startSdkMirrorPoller, isSdkMirrorPollerRunning, ACTIVE_INTERVAL_MS, IDLE_INTERVAL_MS } = await import("../../core/sdkMirrorPoller.js");
+const { mirrorOnce, __resetMirrorState, markCdpConsoleOpen, markCdpConsoleSeen, markCdpConsoleClosed, startSdkMirrorPoller, isSdkMirrorPollerRunning, ACTIVE_INTERVAL_MS, IDLE_INTERVAL_MS, READ_EXPRESSION } = await import("../../core/sdkMirrorPoller.js");
 const { getLogBuffer, getNetworkBuffer, resetEpochs, bumpEpoch, getEpoch, connectedApps, logBuffers, networkBuffers } = await import("../../core/state.js");
 const { __resetLogSeq } = await import("../../core/logs.js");
 
@@ -194,9 +194,9 @@ describe("mirrorOnce", () => {
 
     // Garbage came back over a working socket: not a transport failure, so it
     // must not push the poller toward giving up.
-    it("returns zeroes on malformed JSON without flagging a failure", async () => {
+    it("reports zeroes on malformed JSON, flagged as a failure", async () => {
         executeInApp.mockResolvedValue({ success: true, result: "not json" });
-        expect(await mirrorOnce("dev")).toEqual({ logs: 0, network: 0 });
+        expect(await mirrorOnce("dev")).toEqual({ logs: 0, network: 0, failed: true });
     });
 
     it("swallows a thrown eval and reports it as a failure", async () => {
@@ -346,5 +346,127 @@ describe("startSdkMirrorPoller give-up", () => {
         // poller would already be stopped.
         expect(executeInApp).toHaveBeenCalledTimes(7);
         expect(isSdkMirrorPollerRunning("dev")).toBe(true);
+    });
+});
+
+// ── Cursor-paginated read (READ_EXPRESSION, evaluated against a fake SDK) ──
+
+/**
+ * Run the batched read expression the way the app would: a fresh function
+ * scope over a fake globalThis carrying the SDK and the per-runtime cursors.
+ */
+// The runtime-global store is shared across calls, so the cursors — which
+// the expression parks on globalThis — persist the way they do in the app.
+const runtimeGlobals: Record<string, any> = {};
+function runReadExpression(sdk: any): any {
+    runtimeGlobals.__EXECBRO__ = sdk;
+    const g = runtimeGlobals;
+    const fn = new Function("globalThis", "Date", "Math", "JSON", "return " + READ_EXPRESSION);
+    return JSON.parse(fn(g, Date, Math, JSON));
+}
+
+function bigLog(id: string, kb: number) {
+    return { id, timestamp: Date.now(), level: "log", message: "x".repeat(kb * 1024) };
+}
+
+describe("READ_EXPRESSION cursor pagination", () => {
+    beforeEach(() => {
+        delete runtimeGlobals.__EXECBRO_MIRROR_CURSOR__;
+        delete runtimeGlobals.__EXECBRO_RUN_ID__;
+    });
+
+    it("respects the byte budget and advances cursors across batches", () => {
+        // ~500KB per entry: three entries is past the 1.5MB budget, so the
+        // first batch must carry two and the cursor must not re-send them.
+        const sdk = {
+            getNetworkEntries: () => [],
+            getConsoleEntries: () => [bigLog("c1", 500), bigLog("c2", 500), bigLog("c3", 500)],
+        };
+        const batch1 = runReadExpression(sdk);
+        expect(batch1.console.map((e: any) => e.id)).toEqual(["c1", "c2"]);
+
+        const batch2 = runReadExpression(sdk);
+        expect(batch2.console.map((e: any) => e.id)).toEqual(["c3"]);
+
+        const batch3 = runReadExpression(sdk);
+        expect(batch3.console).toEqual([]);
+    });
+
+    it("ships a single over-budget entry rather than sticking the cursor", () => {
+        const huge = { id: "huge", timestamp: Date.now(), level: "log", message: "x".repeat(2 * 1024 * 1024) };
+        const sdk = { getNetworkEntries: () => [], getConsoleEntries: () => [huge] };
+        const batch = runReadExpression(sdk);
+        expect(batch.console.map((e: any) => e.id)).toEqual(["huge"]);
+        expect(runReadExpression(sdk).console).toEqual([]);
+    });
+
+    it("re-sends an in-flight network entry once it completes", () => {
+        const pendingEntry = { ...netEntry("n-pending"), completed: false };
+        const sdk: any = {
+            getNetworkEntries: () => [pendingEntry],
+            getConsoleEntries: () => [],
+        };
+        const batch1 = runReadExpression(sdk);
+        expect(batch1.network.map((e: any) => e.id)).toEqual(["n-pending"]);
+
+        // Still incomplete on the next poll: re-sent (the old full read
+        // naturally re-read pendings; the cursor must not lose that).
+        const batch2 = runReadExpression(sdk);
+        expect(batch2.network.map((e: any) => e.id)).toEqual(["n-pending"]);
+
+        // Completed: shipped exactly once more, then dropped from the list.
+        pendingEntry.completed = true;
+        const batch3 = runReadExpression(sdk);
+        expect(batch3.network.map((e: any) => e.id)).toEqual(["n-pending"]);
+        expect(runReadExpression(sdk).network).toEqual([]);
+    });
+
+    it("serves the buffer that is further behind first so neither starves", () => {
+        // Console has a 2-entry backlog, network none: console goes first.
+        const sdk = {
+            getNetworkEntries: () => [],
+            getConsoleEntries: () => [bigLog("c1", 1200), bigLog("c2", 1200), bigLog("c3", 1200)],
+        };
+        const batch1 = runReadExpression(sdk);
+        expect(batch1.console.map((e: any) => e.id)).toEqual(["c1"]);
+
+        // Network now has a bigger backlog than console: network first.
+        const sdk2 = {
+            getNetworkEntries: () => [netEntry("n1"), netEntry("n2"), netEntry("n3"), netEntry("n4")],
+            getConsoleEntries: () => [bigLog("c1", 1200)],
+        };
+        const batch2 = runReadExpression(sdk2);
+        expect(batch2.network.length).toBeGreaterThanOrEqual(1);
+    });
+});
+
+describe("mirrorOnce failure handling", () => {
+    beforeEach(() => {
+        executeInApp.mockReset();
+        __resetMirrorState();
+        resetEpochs();
+        getLogBuffer("dev").clear();
+        getNetworkBuffer("dev").clear();
+    });
+
+    it("reports a truncated payload as failed so the give-up counter sees it", async () => {
+        executeInApp.mockResolvedValue({ success: true, result: '{"runId":"run-1","network":[{"id":"n1"' });
+        const result = await mirrorOnce("dev");
+        expect(result.failed).toBe(true);
+    });
+
+    it("skips a second poll while one is in flight on the same device", async () => {
+        let release!: (v: any) => void;
+        executeInApp.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+        const first = mirrorOnce("dev");
+        const second = await mirrorOnce("dev");
+        expect(second).toEqual({ logs: 0, network: 0 });
+        release({ success: true, result: JSON.stringify({ runId: "run-1", network: [], console: [] }) });
+        const r = await first;
+        expect(r).toEqual({ logs: 0, network: 0 });
+        // Lock released: the next poll runs.
+        executeInApp.mockResolvedValue(payload([], []));
+        const third = await mirrorOnce("dev");
+        expect(third).toEqual({ logs: 0, network: 0 });
     });
 });
