@@ -1,7 +1,8 @@
 {
     "generatedFrom": "toolRegistry",
-    "count": 70,
+    "count": 73,
     "tools": [
+        "activate_license",
         "android_key_event",
         "android_launch_app",
         "android_list_packages",
@@ -11,6 +12,7 @@
         "clear_logs",
         "clear_network",
         "connect_metro",
+        "delete_account",
         "disconnect_metro",
         "dismiss_keyboard",
         "electron_launch_app",
@@ -23,6 +25,7 @@
         "get_component_tree",
         "get_connection_status",
         "get_images",
+        "get_license_status",
         "get_log_details",
         "get_logs",
         "get_network_requests",
@@ -74,6 +77,9 @@
         "vault_capture"
     ],
     "params": {
+        "activate_license": [
+            "token"
+        ],
         "android_key_event": [
             "deviceId",
             "key"
@@ -116,6 +122,9 @@
         "connect_metro": [
             "device",
             "port"
+        ],
+        "delete_account": [
+            "confirm"
         ],
         "disconnect_metro": [
             "device"
@@ -189,6 +198,7 @@
             "list",
             "source"
         ],
+        "get_license_status": [],
         "get_log_details": [
             "id",
             "maxLength",

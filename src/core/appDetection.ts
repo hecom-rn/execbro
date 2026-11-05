@@ -94,7 +94,7 @@ export function parseDetectionResult(
  * a device appears there is proof of an RN app. Description/title strings
  * reliably identify Bridgeless (new arch) and Hermes setups.
  */
-function inferPresumptiveDetection(app: ConnectedApp, platform: "ios" | "android"): AppDetectionResult {
+function inferPresumptiveDetection(app: ConnectedApp, platform: DevicePlatform): AppDetectionResult {
     const desc = app.deviceInfo.description || "";
     const title = app.deviceInfo.title || "";
     return {
