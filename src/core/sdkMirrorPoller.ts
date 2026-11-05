@@ -173,16 +173,72 @@ export function __resetMirrorState(): void {
 // a new id), and a killed runtime emits no Runtime.executionContextsCleared —
 // there is nothing left to emit it. A fresh JS runtime always has a fresh
 // globalThis, so a changed nonce is direct proof, independent of CDP.
-const READ_EXPRESSION = `JSON.stringify((function(){
+// Cursor-paginated read: the full SDK buffers are far past what one CDP
+// evaluate may return. The inspector send path deadlocks and then OOMs the
+// ArkTS shared heap somewhere between 4.5MB (delivered in 181ms) and 5MB
+// (never arrives; every later message on the socket hangs; the app is killed
+// with Kill Reason: Js Error — verified on a TripleFold emulator, 2026-11-05,
+// after sdkMirrorPoller pushed a 17.3MB full read every 3-10s). So each poll
+// carries at most MIRROR_BATCH_BUDGET bytes of entries, advancing per-runtime
+// cursors stored next to the runId on globalThis: a runtime restart resets
+// them for free, on the same lifecycle the epoch logic already keys off.
+// In-flight (completed:false) network entries are latched by id and re-sent
+// once completed, mirroring what the old full-read gave the seen-set for free.
+const MIRROR_BATCH_BUDGET = 1_500_000;
+
+export const READ_EXPRESSION = `JSON.stringify((function(){
   var runId = globalThis.__EXECBRO_RUN_ID__ || (globalThis.__EXECBRO_RUN_ID__ = String(Math.random()).slice(2) + "-" + Date.now());
   var sdk = globalThis.__EXECBRO__ || globalThis.__RN_AI_DEVTOOLS__;
   if (!sdk) return { runId: runId, now: Date.now(), network: [], console: [] };
-  return {
-    runId: runId,
-    now: Date.now(),
-    network: typeof sdk.getNetworkEntries === "function" ? sdk.getNetworkEntries() : [],
-    console: typeof sdk.getConsoleEntries === "function" ? sdk.getConsoleEntries() : []
-  };
+  var st = globalThis.__EXECBRO_MIRROR_CURSOR__ || (globalThis.__EXECBRO_MIRROR_CURSOR__ = { net: 0, con: 0, netPending: [] });
+  var net = typeof sdk.getNetworkEntries === "function" ? sdk.getNetworkEntries() : [];
+  var con = typeof sdk.getConsoleEntries === "function" ? sdk.getConsoleEntries() : [];
+  var out = { runId: runId, now: Date.now(), network: [], console: [] };
+  var used = 0;
+  // Completed entries latched earlier go first, outside the budget: they are
+  // few and each one unblocks a row the server still renders as pending.
+  // Pending entries are re-sent completed or not: the server's set()
+  // overwrites its pending row either way, and only a completed copy gets
+  // latched there. An entry still missing from the buffer (already evicted)
+  // simply falls out of the list.
+  var stillPending = [];
+  for (var p = 0; p < st.netPending.length; p++) {
+    var found = false;
+    for (var q = 0; q < net.length; q++) {
+      if (net[q].id === st.netPending[p]) {
+        found = true;
+        out.network.push(net[q]);
+        used += JSON.stringify(net[q]).length;
+        if (!net[q].completed) stillPending.push(st.netPending[p]);
+        break;
+      }
+    }
+    if (!found) { /* evicted — drop */ }
+  }
+  st.netPending = stillPending;
+  // Whichever buffer is further behind wins the budget first, so console
+  // backlogs cannot starve while network trickles (or vice versa).
+  for (var round = 0; round < 2; round++) {
+    var netFirst = (net.length - st.net) >= (con.length - st.con);
+    var firstList = netFirst ? net : con, firstKey = netFirst ? "net" : "con";
+    var secondList = netFirst ? con : net, secondKey = netFirst ? "con" : "net";
+    for (var pass = 0; pass < 2; pass++) {
+      var list = pass === 0 ? firstList : secondList;
+      var key = pass === 0 ? firstKey : secondKey;
+      var i = Math.min(st[key], list.length);
+      while (i < list.length) {
+        var len = JSON.stringify(list[i]).length;
+        if (key === "net" && !list[i].completed) st.netPending.push(list[i].id);
+        // A single entry over budget still ships (an empty batch must make
+        // progress, or the cursor would stick forever).
+        if (used + len > ${MIRROR_BATCH_BUDGET} && used > 0) break;
+        out[key === "net" ? "network" : "console"].push(list[i]);
+        used += len; i++;
+      }
+      st[key] = i;
+    }
+  }
+  return out;
 })())`;
 
 /**
@@ -203,7 +259,22 @@ const READ_EXPRESSION = `JSON.stringify((function(){
  * It stays optional so callers that only want the counts (refreshMirror) are
  * unaffected.
  */
+// One in-flight mirror per device. A poll stuck on the inspector send path
+// must not have the next tick fire another evaluate on the same socket —
+// that queueing was the OOM in the first place.
+const mirrorInFlight = new Map<string, boolean>();
+
 export async function mirrorOnce(device: string): Promise<{ logs: number; network: number; failed?: boolean }> {
+    if (mirrorInFlight.get(device)) return { logs: 0, network: 0 };
+    mirrorInFlight.set(device, true);
+    try {
+        return await mirrorOnceInner(device);
+    } finally {
+        mirrorInFlight.set(device, false);
+    }
+}
+
+async function mirrorOnceInner(device: string): Promise<{ logs: number; network: number; failed?: boolean }> {
     let raw;
     const sentAt = Date.now();
     try {
@@ -229,9 +300,11 @@ export async function mirrorOnce(device: string): Promise<{ logs: number; networ
     try {
         parsed = JSON.parse(raw.result);
     } catch {
-        // Garbage over a live socket: the transport is fine, so this must not
-        // count toward the give-up counter.
-        return { logs: 0, network: 0 };
+        // A truncated/garbled payload counts as a failure: with the batched
+        // read above a live socket yields parseable JSON, so repeated parse
+        // failures mean the transport is wedged — exactly what the give-up
+        // counter exists to stop.
+        return { logs: 0, network: 0, failed: true };
     }
 
     // `device` may be a substring; everything keyed below must use the
