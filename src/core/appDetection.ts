@@ -186,6 +186,11 @@ export function scheduleAppDetection(app: ConnectedApp): void {
                                     if (rnohKey) {
                                         app.platform = "harmony";
                                         app.harmonyTargetKey = rnohKey;
+                                        // Keep the stored detection result in sync,
+                                        // or get_apps keeps showing the connect-time
+                                        // platform ("android") that the probe just
+                                        // overruled.
+                                        app.appDetection = { ...parsed, appPlatform: "harmony" };
                                         console.error(`[execbro] HarmonyOS detected via RNOH hilog marker: ${rnohKey}`);
                                     }
                                 })
